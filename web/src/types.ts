@@ -38,6 +38,11 @@ export interface DevelopmentScan {
 
 export interface TaskboardMetadata {
   manageTaskboardSkillPath?: string;
+  iHaveAdhdSkill?: {
+    id: string;
+    label: string;
+    path: string;
+  } | null;
   capabilities?: TaskboardCapabilities;
   mode?: "local" | "cloud";
   realtime?: {

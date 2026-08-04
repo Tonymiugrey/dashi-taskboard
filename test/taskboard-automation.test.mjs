@@ -7,6 +7,7 @@ import {
   buildTaskboardAutomationSpec,
   parseTaskboardAutomationHostRequest,
   reconcileTaskboardAutomation,
+  summarizeTaskboardAutomationReadiness,
 } from "../shared/taskboard-automation.mjs";
 import {
   AUTOMATION_MODELS,
@@ -24,6 +25,9 @@ const baseRequest = {
   projectName: "PPT Skill",
   workspacePath: "/Users/example/Documents/ppt-skill",
   skillPath: "/Users/example/taskboard/skills/manage-taskboard/SKILL.md",
+  adhdSkillPath: "/Users/example/.codex/skills/i-have-adhd/SKILL.md",
+  enabledByUser: true,
+  quotaAware: false,
   intervalMinutes: 5,
   model: "gpt-5.5",
   reasoningEffort: "high",
@@ -168,7 +172,8 @@ test("the stable name and generated prompt are project-scoped and encode the cla
     prompt,
     /\[\$manage-taskboard\]\(\/Users\/example\/taskboard\/skills\/manage-taskboard\/SKILL\.md\)/,
   );
-  assert.match(prompt, /\[\$manage-taskboard\]\([^)]*\) e-taskboard /);
+  assert.match(prompt, /\[\$i-have-adhd:i-have-adhd\]\(\/Users\/example\/\.codex\/skills\/i-have-adhd\/SKILL\.md\)/);
+  assert.match(prompt, /\[\$manage-taskboard\][^\n]*\[\$i-have-adhd:i-have-adhd\][^\n]* e-taskboard /);
   assert.match(prompt, /PPT Skill/);
   assert.match(prompt, /每 5 分钟检查/);
   assert.match(prompt, /ppt-skill/);
@@ -182,6 +187,44 @@ test("the stable name and generated prompt are project-scoped and encode the cla
   assert.match(prompt, /关键改动、验证结果、执行结果和剩余风险/);
   assert.match(prompt, /in_review/);
   assert.match(prompt, /已绑定.*branch.*worktree/);
+  assert.match(prompt, /没有未完成前置阻塞/);
+});
+
+test("automation readiness treats no todos and fully blocked todos as standby", () => {
+  assert.deepEqual(summarizeTaskboardAutomationReadiness([], 100), {
+    state: "standby",
+    checkedAt: 100,
+    todoCount: 0,
+    runnableTodoCount: 0,
+    blockedTodoCount: 0,
+  });
+  assert.deepEqual(summarizeTaskboardAutomationReadiness([{
+    status: "todo",
+    archivedAt: null,
+    relations: { blockedBy: [{ status: "in_review" }] },
+  }], 200), {
+    state: "standby",
+    checkedAt: 200,
+    todoCount: 1,
+    runnableTodoCount: 0,
+    blockedTodoCount: 1,
+  });
+});
+
+test("automation readiness resumes when a todo has no unresolved blocker", () => {
+  const readiness = summarizeTaskboardAutomationReadiness([
+    { status: "todo", archivedAt: null, relations: { blockedBy: [{ status: "done" }] } },
+    { status: "todo", archivedAt: null, relations: { blockedBy: [{ status: "canceled" }] } },
+    { status: "todo", archivedAt: null, relations: { blockedBy: [{ status: "in_progress" }] } },
+    { status: "in_review", archivedAt: null, relations: { blockedBy: [] } },
+  ], 300);
+  assert.deepEqual(readiness, {
+    state: "runnable",
+    checkedAt: 300,
+    todoCount: 3,
+    runnableTodoCount: 2,
+    blockedTodoCount: 1,
+  });
 });
 
 test("the generated cron spec uses the selected whitelisted local Codex options", () => {

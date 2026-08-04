@@ -139,6 +139,15 @@ interface AutomationQuotaStatus {
   reason?: "api-key";
 }
 
+interface AutomationReadinessStatus {
+  state: "runnable" | "standby";
+  reason?: "unavailable";
+  checkedAt: number;
+  todoCount: number;
+  runnableTodoCount: number;
+  blockedTodoCount: number;
+}
+
 interface ProjectAutomationRecord {
   automationId?: string;
   codexProjectId: string;
@@ -146,6 +155,7 @@ interface ProjectAutomationRecord {
   enabledByUser: boolean;
   quotaAware: boolean;
   quota?: AutomationQuotaStatus;
+  readiness?: AutomationReadinessStatus;
   intervalMinutes: AutomationIntervalMinutes;
   model: AutomationModel;
   reasoningEffort: AutomationReasoningEffort;
@@ -167,6 +177,7 @@ interface AutomationHostResponse {
   item?: AutomationHostItem;
   items?: AutomationHostItem[];
   quota?: AutomationQuotaStatus;
+  readiness?: AutomationReadinessStatus;
   policy?: {
     automationId?: string;
     enabledByUser: boolean;
@@ -283,6 +294,9 @@ function readProjectAutomations(): ProjectAutomations {
         || typeof quotaAware !== "boolean"
       ) continue;
       const quota = isAutomationQuotaStatus(candidate.quota) ? candidate.quota : undefined;
+      const readiness = isAutomationReadinessStatus(candidate.readiness)
+        ? candidate.readiness
+        : undefined;
       result[projectId] = {
         automationId: candidate.automationId,
         codexProjectId: candidate.codexProjectId,
@@ -290,6 +304,7 @@ function readProjectAutomations(): ProjectAutomations {
         enabledByUser,
         quotaAware,
         ...(quota ? { quota } : {}),
+        ...(readiness ? { readiness } : {}),
         intervalMinutes: candidate.intervalMinutes ?? 5,
         model,
         reasoningEffort,
@@ -299,6 +314,19 @@ function readProjectAutomations(): ProjectAutomations {
   } catch {
     return {};
   }
+}
+
+function isAutomationReadinessStatus(value: unknown): value is AutomationReadinessStatus {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<AutomationReadinessStatus>;
+  return (
+    (candidate.state === "runnable" || candidate.state === "standby")
+    && (candidate.reason === undefined || candidate.reason === "unavailable")
+    && Number.isFinite(candidate.checkedAt)
+    && Number.isInteger(candidate.todoCount) && candidate.todoCount! >= 0
+    && Number.isInteger(candidate.runnableTodoCount) && candidate.runnableTodoCount! >= 0
+    && Number.isInteger(candidate.blockedTodoCount) && candidate.blockedTodoCount! >= 0
+  );
 }
 
 function isAutomationQuotaStatus(value: unknown): value is AutomationQuotaStatus {
@@ -537,6 +565,7 @@ export function App() {
   const [developmentScan, setDevelopmentScan] = useState<DevelopmentScan>({ workspacePath: null, contexts: [] });
   const [developmentScanLoading, setDevelopmentScanLoading] = useState(false);
   const [manageTaskboardSkillPath, setManageTaskboardSkillPath] = useState("");
+  const [iHaveAdhdSkill, setIHaveAdhdSkill] = useState<TaskboardMetadata["iHaveAdhdSkill"]>(null);
   const [taskboardMetadata, setTaskboardMetadata] = useState<TaskboardMetadata | null>(null);
   const [localAiChatAvailable, setLocalAiChatAvailable] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -645,11 +674,15 @@ export function App() {
     if (!manageTaskboardSkillPath) {
       return { unavailableReason: "任务面板还没有读取到 Skill 路径" };
     }
+    if (!iHaveAdhdSkill?.path) {
+      return { unavailableReason: "本机未发现 i-have-adhd Skill" };
+    }
     return { workspacePath, codexProjectId, unavailableReason: null };
   }, [
     deviceWorkspacePaths,
     embedded,
     hostContext,
+    iHaveAdhdSkill,
     manageTaskboardSkillPath,
     selectedProject,
   ]);
@@ -719,6 +752,7 @@ export function App() {
         && current[projectId]?.enabledByUser === record.enabledByUser
         && current[projectId]?.quotaAware === record.quotaAware
         && JSON.stringify(current[projectId]?.quota) === JSON.stringify(record.quota)
+        && JSON.stringify(current[projectId]?.readiness) === JSON.stringify(record.readiness)
         && current[projectId]?.intervalMinutes === record.intervalMinutes
         && current[projectId]?.model === record.model
         && current[projectId]?.reasoningEffort === record.reasoningEffort
@@ -769,6 +803,7 @@ export function App() {
         projectName: selectedProject.name,
         workspacePath: automationProjectContext.workspacePath,
         skillPath: manageTaskboardSkillPath,
+        adhdSkillPath: iHaveAdhdSkill?.path,
         ...(automationId ? { automationId } : {}),
         enabledByUser: options.enabledByUser,
         quotaAware: options.quotaAware,
@@ -780,6 +815,7 @@ export function App() {
     return response;
   }, [
     automationProjectContext,
+    iHaveAdhdSkill,
     manageTaskboardSkillPath,
     selectedProject,
     selectedProjectId,
@@ -835,6 +871,7 @@ export function App() {
             automationId: undefined,
             status: "PAUSED",
             ...(response.quota ? { quota: response.quota } : {}),
+            ...(response.readiness ? { readiness: response.readiness } : {}),
           });
         }
         return;
@@ -848,6 +885,7 @@ export function App() {
         enabledByUser: stored.enabledByUser,
         quotaAware: stored.quotaAware,
         ...(response.quota ? { quota: response.quota } : {}),
+        ...(response.readiness ? { readiness: response.readiness } : {}),
         intervalMinutes,
         model: item.model,
         reasoningEffort: item.reasoningEffort,
@@ -893,6 +931,7 @@ export function App() {
         enabledByUser: options.enabledByUser,
         quotaAware: options.quotaAware,
         ...(response.quota ? { quota: response.quota } : {}),
+        ...(response.readiness ? { readiness: response.readiness } : {}),
         intervalMinutes: options.intervalMinutes,
         model: options.model,
         reasoningEffort: options.reasoningEffort,
@@ -1080,11 +1119,13 @@ export function App() {
         && current.realtime?.transport === metadata.realtime?.transport
         && current.realtime?.intervalMs === metadata.realtime?.intervalMs
         && current.manageTaskboardSkillPath === metadata.manageTaskboardSkillPath
+        && JSON.stringify(current.iHaveAdhdSkill) === JSON.stringify(metadata.iHaveAdhdSkill)
         && current.localCapabilities?.available === metadata.localCapabilities?.available
           ? current
           : metadata
       ));
       setManageTaskboardSkillPath(metadata.manageTaskboardSkillPath ?? "");
+      setIHaveAdhdSkill(metadata.iHaveAdhdSkill ?? null);
       setLocalAiChatAvailable(metadata.capabilities?.localAiChat === true);
       setDeviceWorkspacePaths((current) => {
         const next = { ...current, ...workspaces };
@@ -1687,9 +1728,17 @@ export function App() {
     window.parent.postMessage({ type: "taskboard:expand-sidebar" }, "*");
   }
 
-  function openTaskInThread(task: Task) {
+  function openTaskInThread(task: Task, forceNew = false) {
+    if (task.threadId && !forceNew) {
+      openThread(task.threadId);
+      return;
+    }
     if (!manageTaskboardSkillPath) {
       setActionError("任务面板还没有读取到 manage-taskboard Skill 路径，请刷新后重试。");
+      return;
+    }
+    if (!iHaveAdhdSkill?.path) {
+      setActionError("本机未发现 i-have-adhd Skill，请先安装或启用后重试。");
       return;
     }
     const worktreePath = task.developmentContext?.type === "worktree"
@@ -1700,7 +1749,7 @@ export function App() {
       ?? developmentScan.workspacePath
       ?? hostContext?.workspacePath;
     const instruction = `e-taskboard Addressing the issues mentioned in ${task.identifier}`;
-    const prompt = `[$manage-taskboard](${manageTaskboardSkillPath}) ${instruction}`;
+    const prompt = `[$manage-taskboard](${manageTaskboardSkillPath}) [$i-have-adhd:i-have-adhd](${iHaveAdhdSkill.path}) ${instruction}`;
 
     if (!embedded || window.parent === window) {
       const query = new URLSearchParams();
@@ -1719,9 +1768,18 @@ export function App() {
         taskId: task.id,
         identifier: task.identifier,
         instruction,
-        skillName: "manage-taskboard",
-        skillDisplayName: "Manage Taskboard",
-        skillPath: manageTaskboardSkillPath,
+        skills: [
+          {
+            name: "manage-taskboard",
+            displayName: "Manage Taskboard",
+            path: manageTaskboardSkillPath,
+          },
+          {
+            name: "i-have-adhd:i-have-adhd",
+            displayName: iHaveAdhdSkill.label,
+            path: iHaveAdhdSkill.path,
+          },
+        ],
         codexProjectId: codexProject?.id ?? (selectedProject?.id === "local" ? hostContext?.projectId : selectedProject?.id),
         projectName: selectedProject?.name,
         workspacePath,

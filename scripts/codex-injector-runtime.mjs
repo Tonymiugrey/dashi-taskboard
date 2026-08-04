@@ -36,14 +36,20 @@ function parseHostRequest(payload, parseAutomationRequest) {
     && typeof request.instruction === "string"
     && request.instruction.length > 0
     && request.instruction.length <= 1_024
-    && typeof request.skillName === "string"
-    && /^[a-z0-9][a-z0-9-]{0,79}$/i.test(request.skillName)
-    && typeof request.skillDisplayName === "string"
-    && request.skillDisplayName.length > 0
-    && request.skillDisplayName.length <= 120
-    && typeof request.skillPath === "string"
-    && request.skillPath.length > 0
-    && request.skillPath.length <= 1_024
+    && Array.isArray(request.skills)
+    && request.skills.length === 2
+    && request.skills.every((skill) => (
+      skill
+      && typeof skill === "object"
+      && typeof skill.name === "string"
+      && /^[a-z0-9][a-z0-9:-]{0,119}$/i.test(skill.name)
+      && typeof skill.displayName === "string"
+      && skill.displayName.length > 0
+      && skill.displayName.length <= 120
+      && typeof skill.path === "string"
+      && skill.path.length > 0
+      && skill.path.length <= 1_024
+    ))
   ) {
     return { id, request, error: null };
   }

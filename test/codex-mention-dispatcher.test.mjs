@@ -50,6 +50,7 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
     },
   };
   const aiCalls = [];
+  const memoryCalls = [];
   const aiChat = {
     listThreads() {
       return [];
@@ -68,6 +69,17 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
     getThread() {
       return { codexThreadId: "existing-codex-thread" };
     },
+    getThreadSnapshot() {
+      return {
+        events: [{
+          runId: "run-1",
+          type: "agent_message",
+          role: "assistant",
+          content: "Finished",
+          data: { status: "completed" },
+        }],
+      };
+    },
   };
   const configStore = {
     async read() {
@@ -83,6 +95,7 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
     configStore,
     cloudProxy,
     aiChat,
+    recordAutomationMemory: async (input) => memoryCalls.push(input),
     heartbeatIntervalMs: 60_000,
   });
   dispatcher.stopped = false;
@@ -93,6 +106,19 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
   assert.equal(aiCalls.filter((call) => call.type === "create").length, 1);
   assert.equal(aiCalls[0].input.codexThreadId, "existing-codex-thread");
   assert.equal(aiCalls[1].input.message, trigger.comment.body);
+  assert.deepEqual(memoryCalls, [{
+    trigger,
+    status: "completed",
+    threadId: "existing-codex-thread",
+    runId: "run-1",
+    events: [{
+      runId: "run-1",
+      type: "agent_message",
+      role: "assistant",
+      content: "Finished",
+      data: { status: "completed" },
+    }],
+  }]);
   assert.deepEqual(calls.at(-1), {
     pathname: "/api/codex-targets/codex-device-1/triggers/claim",
     method: "POST",
@@ -108,4 +134,71 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
       threadId: "existing-codex-thread",
     },
   });
+});
+
+test("a targeted comment starts a missing conversation with the ADHD skill", async () => {
+  const trigger = {
+    targetId: "codex-device-1",
+    claimToken: "claim-2",
+    project: { id: "project-1", name: "Project One" },
+    task: { id: "task-2", identifier: "PROJECT1-8", threadId: null },
+    comment: {
+      id: "comment-2",
+      body: "继续处理这个返工。",
+      mentions: [{ targetId: "codex-device-1", status: "claimed" }],
+    },
+  };
+  let claimed = false;
+  const turns = [];
+  const dispatcher = new CodexMentionDispatcher({
+    configStore: {
+      async read() {
+        return {
+          remoteUrl: "https://taskboard.example.test",
+          actorName: "Mac mini",
+          deviceTarget: { id: "codex-device-1", name: "Codex · Mac mini" },
+          projectMappings: { "project-1": "/workspace/project-one" },
+        };
+      },
+    },
+    cloudProxy: {
+      async forward(request) {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/api/codex-targets/heartbeat") return json({});
+        if (pathname.endsWith("/triggers/claim")) {
+          if (claimed) return json({ trigger: null });
+          claimed = true;
+          return json({ trigger });
+        }
+        if (pathname.startsWith("/api/codex-triggers/")) return json({});
+        throw new Error(`Unexpected path ${pathname}`);
+      },
+    },
+    aiChat: {
+      listThreads: () => [],
+      async createResolvedThread(input) {
+        assert.equal(input.codexThreadId, null);
+        return { id: "bridge-thread-2", codexThreadId: null };
+      },
+      async startTurn(threadId, input) {
+        turns.push({ threadId, input });
+        return { id: "run-2" };
+      },
+      async waitForRun() { return { status: "completed" }; },
+      getThread() { return { codexThreadId: "new-codex-thread" }; },
+      getThreadSnapshot() { return { events: [] }; },
+    },
+    heartbeatIntervalMs: 60_000,
+  });
+  dispatcher.stopped = false;
+  await dispatcher.tick();
+  dispatcher.stop();
+
+  assert.deepEqual(turns, [{
+    threadId: "bridge-thread-2",
+    input: {
+      message: `\uFFFC${trigger.comment.body}`,
+      skillIds: ["i-have-adhd:i-have-adhd"],
+    },
+  }]);
 });

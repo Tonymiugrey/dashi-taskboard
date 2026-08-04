@@ -188,7 +188,10 @@ test("complete App automation payloads cross the injected forwarder into the cur
     projectName: "Local",
     workspacePath: "/tmp/local-project",
     skillPath: "/tmp/manage-taskboard/SKILL.md",
+    adhdSkillPath: "/tmp/i-have-adhd/SKILL.md",
     automationId: "automation-1",
+    enabledByUser: true,
+    quotaAware: false,
     intervalMinutes: 10,
     model: "gpt-5.6-sol",
     reasoningEffort: "ultra",
@@ -226,9 +229,9 @@ test("issues open an unsent native Codex composer in the exact workspace with a 
   assert.doesNotMatch(source, /prefillPrompt: prompt/);
   assert.match(source, /requestHostTaskComposerPrefill\(\{/);
   assert.match(source, /requestHost\("prefill-task-composer"/);
-  assert.match(source, /function waitForPreparedComposer\(identifier, skillPath\)/);
+  assert.match(source, /function waitForPreparedComposer\(identifier, skills\)/);
   assert.match(source, /\[skill-mention-name\]/);
-  assert.match(source, /mention\.getAttribute\("skill-mention-path"\) === skillPath/);
+  assert.match(source, /mention\.getAttribute\("skill-mention-path"\) === skill\.path/);
   assert.doesNotMatch(source, /submit\.click\(\)/);
   assert.match(source, /type: "taskboard:thread-prepared"/);
   assert.doesNotMatch(source, /function waitForCreatedThread/);
@@ -240,11 +243,13 @@ test("issues open an unsent native Codex composer in the exact workspace with a 
   );
   assert.match(
     webApp,
-    /const prompt = `\[\$manage-taskboard\]\(\$\{manageTaskboardSkillPath\}\) \$\{instruction\}`/,
+    /const prompt = `\[\$manage-taskboard\]\(\$\{manageTaskboardSkillPath\}\) \[\$i-have-adhd:i-have-adhd\]\(\$\{iHaveAdhdSkill\.path\}\) \$\{instruction\}`/,
   );
-  assert.match(webApp, /skillName: "manage-taskboard"/);
-  assert.match(webApp, /skillDisplayName: "Manage Taskboard"/);
-  assert.match(webApp, /skillPath: manageTaskboardSkillPath/);
+  assert.match(webApp, /name: "manage-taskboard"/);
+  assert.match(webApp, /displayName: "Manage Taskboard"/);
+  assert.match(webApp, /path: manageTaskboardSkillPath/);
+  assert.match(webApp, /name: "i-have-adhd:i-have-adhd"/);
+  assert.match(webApp, /displayName: iHaveAdhdSkill\.label/);
   assert.match(webApp, /instruction,/);
   assert.match(webApp, /type: "taskboard:create-thread"/);
   assert.match(webApp, /type: "taskboard:open-thread", payload: \{ threadId \}/);

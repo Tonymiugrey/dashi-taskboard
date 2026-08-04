@@ -631,33 +631,35 @@
     }
   }
 
-  async function waitForPreparedComposer(identifier, skillPath) {
+  async function waitForPreparedComposer(identifier, skills) {
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
       const editor = document.querySelector('[data-codex-composer="true"][contenteditable="true"]');
       if (editor && editor.getClientRects().length > 0) {
         const containsIdentifier = normalizedLabel(editor.textContent).includes(normalizedLabel(identifier));
-        const skillMention = Array.from(editor.querySelectorAll("[skill-mention-name]"))
-          .find((mention) => (
-            mention.getAttribute("skill-mention-name") === "manage-taskboard"
-            && mention.getAttribute("skill-mention-path") === skillPath
-          ));
-        if (containsIdentifier && skillMention) return editor;
+        const mentions = Array.from(editor.querySelectorAll("[skill-mention-name]"));
+        const hasSkills = skills.every((skill) => mentions.some((mention) => (
+          mention.getAttribute("skill-mention-name") === skill.name
+          && mention.getAttribute("skill-mention-path") === skill.path
+        )));
+        if (containsIdentifier && hasSkills) return editor;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 80));
     }
-    throw new Error("Codex 对话输入框没有生成 manage-taskboard Skill 引用");
+    throw new Error("Codex 对话输入框没有生成所需的 Skill 引用");
   }
 
   async function createThreadForTask(payload) {
     const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
     const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
     const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
-    const skillName = typeof payload?.skillName === "string" ? payload.skillName.trim() : "";
-    const skillDisplayName = typeof payload?.skillDisplayName === "string"
-      ? payload.skillDisplayName.trim()
-      : "";
-    const skillPath = typeof payload?.skillPath === "string" ? payload.skillPath.trim() : "";
+    const skills = Array.isArray(payload?.skills)
+      ? payload.skills.map((skill) => ({
+          name: typeof skill?.name === "string" ? skill.name.trim() : "",
+          displayName: typeof skill?.displayName === "string" ? skill.displayName.trim() : "",
+          path: typeof skill?.path === "string" ? skill.path.trim() : "",
+        }))
+      : [];
     const workspacePath = typeof payload?.workspacePath === "string"
       ? payload.workspacePath.trim()
       : "";
@@ -665,9 +667,8 @@
       !taskId
       || !identifier
       || !instruction
-      || !skillName
-      || !skillDisplayName
-      || !skillPath
+      || skills.length !== 2
+      || skills.some((skill) => !skill.name || !skill.displayName || !skill.path)
       || pendingThreadCreation
     ) return;
     pendingThreadCreation = taskId;
@@ -711,11 +712,9 @@
       });
       await requestHostTaskComposerPrefill({
         instruction,
-        skillDisplayName,
-        skillName,
-        skillPath,
+        skills,
       });
-      await waitForPreparedComposer(identifier, skillPath);
+      await waitForPreparedComposer(identifier, skills);
       postToFrame({ type: "taskboard:thread-prepared", payload: { taskId } });
     } catch (error) {
       postToFrame({
@@ -736,6 +735,7 @@
       projectName: payload.projectName,
       workspacePath: payload.workspacePath,
       skillPath: payload.skillPath,
+      adhdSkillPath: payload.adhdSkillPath,
       ...(payload.automationId === undefined ? {} : { automationId: payload.automationId }),
       enabledByUser: payload.enabledByUser,
       quotaAware: payload.quotaAware,
@@ -770,6 +770,7 @@
               item: response.item,
               items: response.items,
               quota: response.quota,
+              readiness: response.readiness,
               policy: response.policy,
             },
       });
@@ -1033,15 +1034,11 @@
 
   function requestHostTaskComposerPrefill({
     instruction,
-    skillDisplayName,
-    skillName,
-    skillPath,
+    skills,
   }) {
     return requestHost("prefill-task-composer", {
       instruction,
-      skillDisplayName,
-      skillName,
-      skillPath,
+      skills,
     });
   }
 

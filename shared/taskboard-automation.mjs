@@ -13,6 +13,7 @@ const HOST_REQUEST_FIELDS = new Set([
   "projectName",
   "workspacePath",
   "skillPath",
+  "adhdSkillPath",
   "automationId",
   "enabledByUser",
   "quotaAware",
@@ -29,7 +30,11 @@ export function parseTaskboardAutomationHostRequest(value) {
   if (!AUTOMATION_OPERATIONS.has(value.operation)) return null;
   if (!validProjectId(value.taskboardProjectId)) return null;
   if (!validText(value.codexProjectId, 256) || !validText(value.projectName, 200)) return null;
-  if (!validAbsolutePath(value.workspacePath) || !validAbsolutePath(value.skillPath)) return null;
+  if (
+    !validAbsolutePath(value.workspacePath)
+    || !validAbsolutePath(value.skillPath)
+    || !validAbsolutePath(value.adhdSkillPath)
+  ) return null;
   if (!INTERVAL_MINUTES.has(value.intervalMinutes)) return null;
   if (!isSupportedModelEffort(value.model, value.reasoningEffort)) return null;
   if (value.automationId !== undefined && !validText(value.automationId, 256)) return null;
@@ -45,6 +50,7 @@ export function parseTaskboardAutomationHostRequest(value) {
     projectName: value.projectName,
     workspacePath: value.workspacePath,
     skillPath: value.skillPath,
+    adhdSkillPath: value.adhdSkillPath,
     ...(value.automationId === undefined ? {} : { automationId: value.automationId }),
     enabledByUser: value.enabledByUser,
     quotaAware: value.quotaAware,
@@ -60,12 +66,32 @@ export function buildTaskboardAutomationName(request) {
 
 export function buildTaskboardAutomationPrompt(request) {
   return [
-    `[$manage-taskboard](${request.skillPath}) e-taskboard 每 ${request.intervalMinutes} 分钟检查任务面板中的「${request.projectName}」项目（项目 ID：${request.taskboardProjectId}，项目目录：${request.workspacePath}）。`,
+    `[$manage-taskboard](${request.skillPath}) [$i-have-adhd:i-have-adhd](${request.adhdSkillPath}) e-taskboard 每 ${request.intervalMinutes} 分钟检查任务面板中的「${request.projectName}」项目（项目 ID：${request.taskboardProjectId}，项目目录：${request.workspacePath}）。`,
     "每次仅处理一个 todo：先用 issue get 读取最新议题内容，并用 comment list 读取全部评论，确认是否包含已完成后被打回的返工要求。",
+    "只能认领没有未完成前置阻塞的 todo；无可运行 todo 时直接结束，不创建新议题、不写“本轮无任务”评论。",
     "认领时使用最新 version 将议题移动到 in_progress；若发生版本冲突或最新状态已变化，立即跳过，避免多个 Agent 抢同一任务。",
     "若议题已绑定 branch 或 worktree，必须在该议题绑定的开发上下文执行，避免并行 Agent 修改同一工作目录。",
     "执行完成并验证后，先用 comment add 记录关键改动、验证结果、执行结果和剩余风险，再使用最新 version 将议题移动到 in_review；不要直接标记为 done。",
   ].join("\n");
+}
+
+export function summarizeTaskboardAutomationReadiness(tasks, checkedAt = Date.now()) {
+  const activeTodos = Array.isArray(tasks)
+    ? tasks.filter((task) => task?.status === "todo" && !task.archivedAt)
+    : [];
+  const runnableTodos = activeTodos.filter((task) => (
+    !Array.isArray(task.relations?.blockedBy)
+    || task.relations.blockedBy.every((blocker) => (
+      blocker?.status === "done" || blocker?.status === "canceled"
+    ))
+  ));
+  return {
+    state: runnableTodos.length > 0 ? "runnable" : "standby",
+    checkedAt,
+    todoCount: activeTodos.length,
+    runnableTodoCount: runnableTodos.length,
+    blockedTodoCount: activeTodos.length - runnableTodos.length,
+  };
 }
 
 export function buildTaskboardAutomationSpec(request) {

@@ -10,6 +10,7 @@ import { resolvePort } from "../server/app.mjs";
 import {
   parseTaskboardAutomationHostRequest,
   reconcileTaskboardAutomation,
+  summarizeTaskboardAutomationReadiness,
 } from "../shared/taskboard-automation.mjs";
 import {
   findResidentInjectorPids,
@@ -597,20 +598,43 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
 }
 
 async function applyTaskboardAutomationPolicy(request, rpc, stillCurrent = () => true) {
-  const quota = request.quotaAware
-    ? await readCodexQuotaStatus(request.model)
-    : null;
+  const [quota, readiness] = await Promise.all([
+    request.quotaAware ? readCodexQuotaStatus(request.model) : null,
+    readTaskboardAutomationReadiness(request.taskboardProjectId),
+  ]);
   if (!stillCurrent()) return { quota, stale: true };
   const shouldRun = request.enabledByUser
-    && (!request.quotaAware || quota?.state === "available");
+    && (!request.quotaAware || quota?.state === "available")
+    && readiness.state === "runnable";
   const result = await reconcileTaskboardAutomation(
     { ...request, operation: shouldRun ? "ensure-active" : "pause" },
     rpc,
   );
   if (result?.error === "not-found") {
-    return { ...(quota ? { quota } : {}) };
+    return { ...(quota ? { quota } : {}), readiness };
   }
-  return { ...result, ...(quota ? { quota } : {}) };
+  return { ...result, ...(quota ? { quota } : {}), readiness };
+}
+
+async function readTaskboardAutomationReadiness(projectId) {
+  try {
+    const url = new URL("/api/tasks", taskboardOrigin);
+    url.searchParams.set("projectId", projectId);
+    url.searchParams.set("archived", "false");
+    const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`Taskboard readiness check failed (${response.status})`);
+    const body = await response.json();
+    return summarizeTaskboardAutomationReadiness(body?.tasks, Date.now());
+  } catch {
+    return {
+      state: "standby",
+      reason: "unavailable",
+      checkedAt: Date.now(),
+      todoCount: 0,
+      runnableTodoCount: 0,
+      blockedTodoCount: 0,
+    };
+  }
 }
 
 function storedAutomationPolicy(request) {
@@ -620,6 +644,7 @@ function storedAutomationPolicy(request) {
     projectName: request.projectName,
     workspacePath: request.workspacePath,
     skillPath: request.skillPath,
+    adhdSkillPath: request.adhdSkillPath,
     ...(request.automationId ? { automationId: request.automationId } : {}),
     enabledByUser: request.enabledByUser,
     quotaAware: request.quotaAware,
@@ -629,9 +654,10 @@ function storedAutomationPolicy(request) {
   };
 }
 
-function restoredAutomationPolicy(value) {
+function restoredAutomationPolicy(value, adhdSkillPath) {
   return parseTaskboardAutomationHostRequest({
     ...value,
+    adhdSkillPath: value?.adhdSkillPath ?? adhdSkillPath,
     id: "restored-policy",
     action: "automation",
     requestId: "restored-policy",
@@ -649,8 +675,12 @@ async function ensureQuotaPoliciesLoaded() {
       if (error.code !== "ENOENT") throw error;
     }
     if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+    const needsAdhdSkillPath = Object.values(stored).some((value) => !value?.adhdSkillPath);
+    const metadata = needsAdhdSkillPath
+      ? await fetchJson(`${taskboardOrigin}/api/meta`).catch(() => null)
+      : null;
     for (const value of Object.values(stored)) {
-      const request = restoredAutomationPolicy(value);
+      const request = restoredAutomationPolicy(value, metadata?.iHaveAdhdSkill?.path);
       if (!request) continue;
       quotaPolicyRecords.set(request.taskboardProjectId, { version: 1, request });
     }
@@ -682,7 +712,7 @@ function scheduleQuotaPolicyCheck(record, cdp, result) {
   const previous = quotaPolicyTimers.get(key);
   if (previous) clearTimeout(previous);
   quotaPolicyTimers.delete(key);
-  if (!request.enabledByUser || !request.quotaAware) return;
+  if (!request.enabledByUser) return;
 
   const nextRunAt = Number(result.item?.nextRunAt);
   const nextRunDelay = Number.isFinite(nextRunAt) && nextRunAt > Date.now()
@@ -692,6 +722,7 @@ function scheduleQuotaPolicyCheck(record, cdp, result) {
     && Number.isFinite(result.quota.resetsAt)
     ? Math.max(1_000, result.quota.resetsAt * 1_000 - Date.now() + 1_000)
     : nextRunDelay;
+  const readinessDelay = 15_000;
   const timer = setTimeout(async () => {
     if (quotaPolicyRecords.get(key)?.version !== version) return;
     try {
@@ -703,7 +734,7 @@ function scheduleQuotaPolicyCheck(record, cdp, result) {
         scheduleQuotaPolicyCheck(current, cdp, { quota: { state: "unknown" } });
       }
     }
-  }, Math.min(nextRunDelay, resetDelay));
+  }, Math.min(nextRunDelay, resetDelay, readinessDelay));
   timer.unref();
   quotaPolicyTimers.set(key, timer);
 }
@@ -779,7 +810,7 @@ async function restoreQuotaPolicies(cdp) {
   quotaPoliciesRestored = true;
   await ensureQuotaPoliciesLoaded();
   for (const [projectId, record] of quotaPolicyRecords) {
-    if (record.request.enabledByUser && record.request.quotaAware) {
+    if (record.request.enabledByUser) {
       void enqueueCurrentQuotaPolicy(projectId, cdp).catch((error) => {
         console.error(`Taskboard quota policy restore failed: ${error.message}`);
       });
@@ -788,29 +819,23 @@ async function restoreQuotaPolicies(cdp) {
 }
 
 async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
-  const {
-    instruction,
-    skillDisplayName,
-    skillName,
-    skillPath,
-  } = request;
+  const { instruction, skills } = request;
   const deadline = Date.now() + 8_000;
   while (Date.now() < deadline) {
     const prepared = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
-        const skillName = ${JSON.stringify(skillName)};
-        const skillPath = ${JSON.stringify(skillPath)};
+        const skills = ${JSON.stringify(skills)};
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
         if (!editor) return { ready: false };
-        const mention = Array.from(editor.querySelectorAll("[skill-mention-name]"))
-          .find((candidate) => (
-            candidate.getAttribute("skill-mention-name") === skillName
-            && candidate.getAttribute("skill-mention-path") === skillPath
-          ));
-        if (mention && (editor.textContent || "").includes(instruction)) {
+        const mentions = Array.from(editor.querySelectorAll("[skill-mention-name]"));
+        const hasSkills = skills.every((skill) => mentions.some((candidate) => (
+          candidate.getAttribute("skill-mention-name") === skill.name
+          && candidate.getAttribute("skill-mention-path") === skill.path
+        )));
+        if (hasSkills && (editor.textContent || "").includes(instruction)) {
           return { ready: true, matches: true };
         }
         editor.focus();
@@ -830,89 +855,87 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
     }
     if (prepared.result.value.matches) return { prefilled: true };
 
-    await cdp.send("Input.insertText", { text: "$" });
     break;
   }
 
-  let selectedSkill = false;
-  while (Date.now() < deadline) {
-    const selection = await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        const displayName = ${JSON.stringify(skillDisplayName)};
-        const overlay = Array.from(document.querySelectorAll(
-          '[data-composer-overlay-floating-ui="true"]'
-        )).find((candidate) => candidate.getClientRects().length > 0);
-        if (!overlay) return { ready: false };
-        const button = Array.from(overlay.querySelectorAll(
-          'button[data-list-navigation-item="true"]'
-        )).find((candidate) => Array.from(candidate.querySelectorAll("span"))
-          .some((label) => (label.textContent || "").trim() === displayName));
-        if (!button) return { ready: true, found: false };
-        button.click();
-        return { ready: true, found: true };
-      })()`,
-      contextId: executionContextId,
-      returnByValue: true,
-    });
-    if (selection.result.value?.found) {
-      selectedSkill = true;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 80));
-  }
-  if (!selectedSkill) {
-    throw new Error(`Timed out while selecting the ${skillDisplayName} Skill`);
-  }
-
-  let mentionReady = false;
-  while (Date.now() < deadline) {
-    const mention = await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        const skillName = ${JSON.stringify(skillName)};
-        const skillPath = ${JSON.stringify(skillPath)};
-        const editor = Array.from(document.querySelectorAll(
-          '[data-codex-composer="true"][contenteditable="true"]'
-        )).find((candidate) => candidate.getClientRects().length > 0);
-        if (!editor) return { ready: false };
-        const selected = Array.from(editor.querySelectorAll("[skill-mention-name]"))
-          .find((candidate) => candidate.getAttribute("skill-mention-name") === skillName);
-        return {
-          ready: Boolean(selected),
-          pathMatches: selected?.getAttribute("skill-mention-path") === skillPath,
-        };
-      })()`,
-      contextId: executionContextId,
-      returnByValue: true,
-    });
-    if (mention.result.value?.ready) {
-      if (!mention.result.value.pathMatches) {
-        throw new Error(`Codex selected a different ${skillDisplayName} Skill`);
+  for (const skill of skills) {
+    await cdp.send("Input.insertText", { text: "$" });
+    let selectedSkill = false;
+    while (Date.now() < deadline) {
+      const selection = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const displayName = ${JSON.stringify(skill.displayName)};
+          const overlay = Array.from(document.querySelectorAll(
+            '[data-composer-overlay-floating-ui="true"]'
+          )).find((candidate) => candidate.getClientRects().length > 0);
+          if (!overlay) return { ready: false };
+          const button = Array.from(overlay.querySelectorAll(
+            'button[data-list-navigation-item="true"]'
+          )).find((candidate) => Array.from(candidate.querySelectorAll("span"))
+            .some((label) => (label.textContent || "").trim() === displayName));
+          if (!button) return { ready: true, found: false };
+          button.click();
+          return { ready: true, found: true };
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      });
+      if (selection.result.value?.found) {
+        selectedSkill = true;
+        break;
       }
-      mentionReady = true;
-      break;
+      await new Promise((resolve) => setTimeout(resolve, 80));
     }
-    await new Promise((resolve) => setTimeout(resolve, 80));
-  }
-  if (!mentionReady) {
-    throw new Error(`Timed out while creating the ${skillDisplayName} Skill mention`);
+    if (!selectedSkill) throw new Error(`Timed out while selecting the ${skill.displayName} Skill`);
+
+    let mentionReady = false;
+    while (Date.now() < deadline) {
+      const mention = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const skill = ${JSON.stringify(skill)};
+          const editor = Array.from(document.querySelectorAll(
+            '[data-codex-composer="true"][contenteditable="true"]'
+          )).find((candidate) => candidate.getClientRects().length > 0);
+          if (!editor) return { ready: false };
+          const selected = Array.from(editor.querySelectorAll("[skill-mention-name]"))
+            .find((candidate) => candidate.getAttribute("skill-mention-name") === skill.name);
+          return {
+            ready: Boolean(selected),
+            pathMatches: selected?.getAttribute("skill-mention-path") === skill.path,
+          };
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      });
+      if (mention.result.value?.ready) {
+        if (!mention.result.value.pathMatches) {
+          throw new Error(`Codex selected a different ${skill.displayName} Skill`);
+        }
+        mentionReady = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    if (!mentionReady) {
+      throw new Error(`Timed out while creating the ${skill.displayName} Skill mention`);
+    }
   }
 
-  await cdp.send("Input.insertText", { text: instruction });
+  await cdp.send("Input.insertText", { text: ` ${instruction}` });
   while (Date.now() < deadline) {
     const verified = await cdp.send("Runtime.evaluate", {
       expression: `(() => {
         const instruction = ${JSON.stringify(instruction)};
-        const skillName = ${JSON.stringify(skillName)};
-        const skillPath = ${JSON.stringify(skillPath)};
+        const skills = ${JSON.stringify(skills)};
         const editor = Array.from(document.querySelectorAll(
           '[data-codex-composer="true"][contenteditable="true"]'
         )).find((candidate) => candidate.getClientRects().length > 0);
-        const mention = editor && Array.from(editor.querySelectorAll("[skill-mention-name]"))
-          .find((candidate) => (
-            candidate.getAttribute("skill-mention-name") === skillName
-            && candidate.getAttribute("skill-mention-path") === skillPath
-          ));
-        return Boolean(mention && (editor.textContent || "").includes(instruction));
+        if (!editor) return false;
+        const mentions = Array.from(editor.querySelectorAll("[skill-mention-name]"));
+        return skills.every((skill) => mentions.some((candidate) => (
+          candidate.getAttribute("skill-mention-name") === skill.name
+          && candidate.getAttribute("skill-mention-path") === skill.path
+        ))) && (editor.textContent || "").includes(instruction);
       })()`,
       contextId: executionContextId,
       returnByValue: true,

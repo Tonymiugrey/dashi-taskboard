@@ -29,6 +29,14 @@ interface AutomationState extends AutomationOptions {
     resetsAt?: number;
     reason?: "api-key";
   };
+  readiness?: {
+    state: "runnable" | "standby";
+    reason?: "unavailable";
+    checkedAt: number;
+    todoCount: number;
+    runnableTodoCount: number;
+    blockedTodoCount: number;
+  };
 }
 
 interface ProjectAutomationMenuProps {
@@ -71,19 +79,18 @@ export function ProjectAutomationMenu({
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
   const [draft, setDraft] = useState<AutomationOptions>(DEFAULT_OPTIONS);
-  const status = automation?.status ?? "PAUSED";
   const quota = automation?.quota;
+  const readiness = automation?.readiness;
   const stateLabel = !automation?.enabledByUser
-    ? "已暂停"
-    : automation.quotaAware && quota?.state === "blocked"
-      ? "额度暂停"
-      : automation.quotaAware && quota?.state === "unavailable"
-        ? "额度不可用"
-        : automation.quotaAware && (!quota || quota.state === "unknown")
-          ? "额度未知"
-          : status === "ACTIVE"
-            ? "运行中"
-            : "已暂停";
+    ? "已暂停 · 用户关闭"
+    : automation.quotaAware && quota?.state !== "available"
+      ? "已暂停 · 额度不足"
+      : readiness?.state === "standby"
+        ? "待机 · 无待办"
+        : "运行中";
+  const visuallyRunning = automation?.enabledByUser
+    && (!automation.quotaAware || quota?.state === "available")
+    && readiness?.state !== "standby";
   const disabled = pending || Boolean(unavailableReason);
 
   useEffect(() => {
@@ -153,7 +160,7 @@ export function ProjectAutomationMenu({
     >
       <div className="project-automation-menu-heading">
         <strong>自动认领待办</strong>
-        <span className={status === "ACTIVE" ? "is-active" : "is-paused"}>
+        <span className={visuallyRunning ? "is-active" : "is-paused"}>
           {stateLabel}
         </span>
       </div>
@@ -204,6 +211,14 @@ export function ProjectAutomationMenu({
           )}
           {(!quota || quota.state === "unknown") && "额度状态未知，自动认领已暂停"}
         </div>
+      )}
+      {readiness?.state === "standby" && readiness.blockedTodoCount > 0 && (
+        <p className="project-automation-note">
+          {readiness.blockedTodoCount} 个 todo 正在等待前置任务；解除阻塞后会自动恢复。
+        </p>
+      )}
+      {readiness?.reason === "unavailable" && (
+        <p className="project-automation-note">暂时无法检查待办，已保持待机；连接恢复后会自动重试。</p>
       )}
       <label className="project-automation-field">
         <span>间隔</span>
@@ -256,12 +271,12 @@ export function ProjectAutomationMenu({
       <button
         ref={triggerRef}
         type="button"
-        className={`project-automation-trigger no-drag ${status === "ACTIVE" ? "is-active" : "is-paused"}`}
-        aria-label={status === "ACTIVE" ? "自动认领" : "无自动化"}
+        className={`project-automation-trigger no-drag ${visuallyRunning ? "is-active" : "is-paused"}`}
+        aria-label={stateLabel}
         aria-busy={pending}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={status === "ACTIVE" ? "自动认领" : "无自动化"}
+        title={stateLabel}
         onClick={() => {
           if (!open) {
             setPosition((current) => ({ ...current, ready: false }));
@@ -270,8 +285,8 @@ export function ProjectAutomationMenu({
           setOpen((current) => !current);
         }}
       >
-        <LinearIcon name={status === "ACTIVE" ? "play" : "pause"} />
-        <span>{status === "ACTIVE" ? "自动认领" : "无自动化"}</span>
+        <LinearIcon name={visuallyRunning ? "play" : "pause"} />
+        <span>{stateLabel}</span>
       </button>
       {menu}
     </>

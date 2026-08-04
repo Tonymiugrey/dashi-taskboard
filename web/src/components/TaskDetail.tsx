@@ -93,7 +93,7 @@ interface TaskDetailProps {
     relatedTaskId: string,
   ) => Promise<RelationMutationResult>;
   onOpenThread: (threadId: string) => void;
-  onOpenInThread: (task: Task) => void;
+  onOpenInThread: (task: Task, forceNew?: boolean) => void;
   openingThread: boolean;
   onError: (message: string | null) => void;
   onAnnounce: (message: string) => void;
@@ -902,6 +902,21 @@ export function TaskDetail({
                             threadId={(comment.mentions ?? []).find((mention) => mention.threadId)!.threadId!}
                             onOpen={onOpenThread}
                           />
+                        </div>
+                      )}
+                      {(comment.mentions ?? []).some((mention) => mention.status === "failed") && (
+                        <div className="codex-mention-recovery">
+                          {(comment.mentions ?? []).find((mention) => mention.status === "failed")?.error && (
+                            <span>{(comment.mentions ?? []).find((mention) => mention.status === "failed")!.error}</span>
+                          )}
+                          <button
+                            className="button secondary"
+                            type="button"
+                            disabled={openingThread}
+                            onClick={() => onOpenInThread(currentTask, true)}
+                          >
+                            新对话继续
+                          </button>
                         </div>
                       )}
                       {comment.attachments.some(

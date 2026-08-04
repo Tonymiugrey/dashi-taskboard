@@ -18,6 +18,7 @@ import {
 } from "../shared/domain.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
+import { createMentionAutomationMemoryRecorder } from "./automation-memory.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
 import { CodexMentionDispatcher } from "./codex-mention-dispatcher.mjs";
 import {
@@ -1282,6 +1283,9 @@ export function resolveServerOptions(options = {}) {
     databasePath: options.databasePath ?? path.join(dataDirectory, "taskboard.sqlite"),
     attachmentsDirectory: options.attachmentsDirectory ?? path.join(dataDirectory, "attachments"),
     cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
+    automationPoliciesPath: options.automationPoliciesPath
+      ?? path.join(dataDirectory, "codex-automation-policies.json"),
+    automationsDirectory: options.automationsDirectory ?? path.join(codexHome, "automations"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
     codexExecutable: options.codexExecutable
@@ -1337,12 +1341,26 @@ export function createTaskboardServer(options = {}) {
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
   });
+  let adhdSkillPromise;
+  const readAdhdSkill = () => {
+    adhdSkillPromise ??= discoverSkills(resolved.codexExecutable, PROJECT_ROOT)
+      .then((skills) => skills.find((skill) => skill.id === "i-have-adhd:i-have-adhd") ?? null)
+      .catch(() => {
+        adhdSkillPromise = null;
+        return null;
+      });
+    return adhdSkillPromise;
+  };
   const mentionDispatcher = options.mentionDispatcher ?? (
     options.remoteFetch === undefined && typeof cloudConfig.ensureDeviceTarget === "function"
       ? new CodexMentionDispatcher({
           configStore: cloudConfig,
           cloudProxy,
           aiChat,
+          recordAutomationMemory: createMentionAutomationMemoryRecorder({
+            policiesPath: resolved.automationPoliciesPath,
+            automationsDirectory: resolved.automationsDirectory,
+          }),
         })
       : null
   );
@@ -1448,6 +1466,7 @@ export function createTaskboardServer(options = {}) {
         }
         return sendJson(response, 200, {
           manageTaskboardSkillPath: resolved.skillPath,
+          iHaveAdhdSkill: await readAdhdSkill(),
           capabilities: { localAiChat: isLoopbackAddress(request.socket.remoteAddress) },
           ...(capabilityCloudConfig?.remoteUrl
             ? {

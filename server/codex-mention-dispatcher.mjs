@@ -19,6 +19,7 @@ export class CodexMentionDispatcher {
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
     deviceName,
+    recordAutomationMemory = async () => {},
     onError = (error) => console.error(`Codex mention dispatcher: ${error.message}`),
   }) {
     this.configStore = configStore;
@@ -27,6 +28,7 @@ export class CodexMentionDispatcher {
     this.pollIntervalMs = pollIntervalMs;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.deviceName = deviceName;
+    this.recordAutomationMemory = recordAutomationMemory;
     this.onError = onError;
     this.timer = null;
     this.running = false;
@@ -87,7 +89,9 @@ export class CodexMentionDispatcher {
 
   async #execute(config, trigger) {
     const workspacePath = config.projectMappings[trigger.project.id];
+    const createsNewConversation = !trigger.task.threadId;
     let thread = null;
+    let run = null;
     try {
       if (!workspacePath) {
         throw new Error(`Project '${trigger.project.id}' is not mapped on this device`);
@@ -109,19 +113,33 @@ export class CodexMentionDispatcher {
           sandbox: "workspace-write",
         });
       }
-      const run = await this.aiChat.startTurn(thread.id, {
-        message: trigger.comment.body,
+      run = await this.aiChat.startTurn(thread.id, {
+        message: createsNewConversation ? `\uFFFC${trigger.comment.body}` : trigger.comment.body,
+        ...(createsNewConversation ? { skillIds: ["i-have-adhd:i-have-adhd"] } : {}),
       });
       const completed = await this.aiChat.waitForRun(run.id);
       const latestThread = this.aiChat.getThread(thread.id);
       if (completed.status !== "completed") {
         throw new Error(completed.error || "Codex did not complete the mentioned request");
       }
+      await this.#remember(trigger, {
+        status: "completed",
+        threadId: latestThread.codexThreadId ?? trigger.task.threadId ?? undefined,
+        runId: run.id,
+        events: this.#runEvents(thread.id),
+      });
       await this.#finish(trigger, {
         status: "completed",
         threadId: latestThread.codexThreadId ?? trigger.task.threadId ?? undefined,
       });
     } catch (error) {
+      await this.#remember(trigger, {
+        status: "failed",
+        threadId: thread?.codexThreadId ?? trigger.task.threadId ?? undefined,
+        runId: run?.id,
+        events: this.#runEvents(thread?.id),
+        error: error instanceof Error ? error.message : String(error),
+      });
       await this.#finish(trigger, {
         status: "failed",
         threadId: thread?.codexThreadId ?? trigger.task.threadId ?? undefined,
@@ -129,6 +147,23 @@ export class CodexMentionDispatcher {
       }).catch((finishError) => this.onError(
         finishError instanceof Error ? finishError : new Error(String(finishError)),
       ));
+    }
+  }
+
+  #runEvents(threadId) {
+    if (!threadId || typeof this.aiChat.getThreadSnapshot !== "function") return [];
+    try {
+      return this.aiChat.getThreadSnapshot(threadId)?.events ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  async #remember(trigger, result) {
+    try {
+      await this.recordAutomationMemory({ trigger, ...result });
+    } catch (error) {
+      this.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 

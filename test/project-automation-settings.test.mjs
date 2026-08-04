@@ -31,12 +31,13 @@ test("project automation state is device-local and scoped by taskboard project",
 
 test("automation requests use the exact Codex host message contract", () => {
   assert.match(appSource, /type: "taskboard:automation-request"/);
-  assert.match(appSource, /operation: "ensure-active" \| "pause" \| "list"/);
+  assert.match(appSource, /operation: "ensure-active" \| "pause" \| "list" \| "apply-policy"/);
   assert.match(appSource, /taskboardProjectId: selectedProjectId/);
   assert.match(appSource, /codexProjectId/);
   assert.match(appSource, /projectName: selectedProject\.name/);
   assert.match(appSource, /workspacePath/);
   assert.match(appSource, /skillPath: manageTaskboardSkillPath/);
+  assert.match(appSource, /adhdSkillPath: iHaveAdhdSkill\?\.path/);
   assert.match(appSource, /intervalMinutes: options\.intervalMinutes/);
   assert.match(appSource, /model: options\.model/);
   assert.match(appSource, /reasoningEffort: options\.reasoningEffort/);
@@ -55,11 +56,13 @@ test("project mapping is based on exact ids and workspace paths, never project n
 
 test("the project navigation automation menu owns the icon, fields, and accessible popover", () => {
   assert.doesNotMatch(settingsSource, /自动认领待办|automationEnabled|automationPending/);
-  assert.match(menuSource, /status === "ACTIVE" \? "play" : "pause"/);
+  assert.match(menuSource, /visuallyRunning \? "play" : "pause"/);
   assert.doesNotMatch(menuSource, /statusStarted|statusTodo/);
   assert.match(menuSource, /aria-busy=\{pending/);
   assert.match(menuSource, /自动认领/);
-  assert.match(menuSource, /无自动化/);
+  assert.match(menuSource, /待机 · 无待办/);
+  assert.match(menuSource, /已暂停 · 用户关闭/);
+  assert.match(menuSource, /已暂停 · 额度不足/);
   assert.doesNotMatch(menuSource, /已开启自动认领|自动认领未开启/);
   assert.match(menuSource, /自动认领开关/);
   assert.match(menuSource, /5, 10, 15, 30, 60/);
@@ -96,9 +99,9 @@ test("automation play and pause retain Linear's 16px filled presentation", () =>
 });
 
 test("the automation menu reuses the Linear switch and keeps form focus chrome suppressed", () => {
-  assert.match(menuSource, /className=\{`board-setting-switch\$\{draft\.status === "ACTIVE" \? " is-on" : ""\}`\}/);
+  assert.match(menuSource, /className=\{`board-setting-switch\$\{draft\.enabledByUser \? " is-on" : ""\}`\}/);
   assert.match(menuSource, /role="switch"/);
-  assert.match(menuSource, /aria-checked=\{draft\.status === "ACTIVE"\}/);
+  assert.match(menuSource, /aria-checked=\{draft\.enabledByUser\}/);
   assert.doesNotMatch(menuSource, /type="checkbox"/);
   assert.match(styles, /\.project-automation-field select:focus-visible\s*\{[^}]*outline:\s*0;[^}]*box-shadow:\s*none;/s);
   assert.doesNotMatch(styles, /\.project-automation-switch input:focus-visible/);
@@ -107,7 +110,7 @@ test("the automation menu reuses the Linear switch and keeps form focus chrome s
 test("unavailable automation state has one notice, clears stale errors, and cannot change", () => {
   assert.match(menuSource, /error && error !== unavailableReason/);
   assert.match(menuSource, /const disabled = pending \|\| Boolean\(unavailableReason\)/);
-  assert.equal(menuSource.match(/disabled=\{disabled\}/g)?.length, 4);
+  assert.equal(menuSource.match(/disabled=\{disabled\}/g)?.length, 5);
   const reconcileSource = appSource.slice(
     appSource.indexOf("const reconcileProjectAutomation"),
     appSource.indexOf("const saveProjectAutomation"),
@@ -148,11 +151,11 @@ test("pending completion reconciles the optimistic draft to confirmed host state
 });
 
 test("opening settings and changing projects reconcile with the host list", () => {
-  assert.match(appSource, /sendAutomationRequest\("list", options, stored\?\.automationId\)/);
+  assert.match(appSource, /stored \? "apply-policy" : "list"/);
   assert.match(appSource, /items\.find\(\(item\) => item\.id === stored\?\.automationId\)/);
   assert.match(appSource, /items\.length === 1 \? items\[0\] : undefined/);
   assert.match(appSource, /status: item\.status/);
   assert.match(appSource, /automationId: undefined/);
-  assert.match(appSource, /options\.status === "PAUSED" && !stored\?\.automationId/);
+  assert.match(appSource, /status: item\?\.status \?\? "PAUSED"/);
   assert.match(appSource, /writeProjectAutomation\(selectedProjectId, previousRecord\)/);
 });
