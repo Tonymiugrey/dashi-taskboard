@@ -3741,6 +3741,7 @@ kbd {
 }
 
 .comment-attachment-list > li > button,
+.comment-mention-button,
 .comment-attach-button {
   display: grid;
   place-items: center;
@@ -3755,9 +3756,21 @@ kbd {
 }
 
 .comment-attachment-list > li > button:hover,
+.comment-mention-button:hover:not(:disabled),
 .comment-attach-button:hover:not(:disabled) {
   background: var(--surface-hover);
   color: var(--text-primary);
+}
+
+.comment-mention-button {
+  font-size: 16px;
+  font-weight: 620;
+  line-height: 1;
+}
+
+.comment-mention-button:disabled,
+.comment-attach-button:disabled {
+  opacity: .45;
 }
 
 .comment-attachment-list > li > button:hover {

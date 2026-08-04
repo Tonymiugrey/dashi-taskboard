@@ -32,6 +32,7 @@ export type PendingInlineImage = InlineImageSegment;
 
 export interface InlineMediaComposerHandle {
   focus: () => void;
+  openMentionPicker: () => void;
 }
 
 interface InlineMediaComposerProps {
@@ -198,7 +199,39 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         const firstText = segments.find((segment) => segment.type === "text");
         if (firstText) textareas.current.get(firstText.id)?.focus();
       },
-    }), [segments]);
+      openMentionPicker,
+    }), [mentionOptions, segments]);
+
+    function openMentionPicker() {
+      if (mentionOptions.length === 0) return;
+      const focusedEntry = [...textareas.current.entries()].find(([, element]) => (
+        element === document.activeElement
+      ));
+      const segment = focusedEntry
+        ? segments.find((candidate) => candidate.id === focusedEntry[0])
+        : [...segments].reverse().find((candidate) => candidate.type === "text");
+      if (!segment || segment.type !== "text") return;
+      const element = textareas.current.get(segment.id);
+      const start = element === document.activeElement
+        ? element.selectionStart
+        : segment.text.length;
+      const end = element === document.activeElement ? element.selectionEnd : start;
+      const prefix = start > 0 && !/\s/.test(segment.text[start - 1]) ? " @" : "@";
+      const nextText = `${segment.text.slice(0, start)}${prefix}${segment.text.slice(end)}`;
+      const mentionStart = start + prefix.length - 1;
+      const cursor = start + prefix.length;
+      pendingFocus.current = { id: segment.id, offset: cursor };
+      onChange(segments.map((candidate) => candidate.id === segment.id
+        ? { ...segment, text: nextText }
+        : candidate));
+      setMentionMenu({
+        segmentId: segment.id,
+        start: mentionStart,
+        end: cursor,
+        query: "",
+        selectedIndex: 0,
+      });
+    }
 
     function changeText(id: string, text: string, cursor: number) {
       onChange(segments.map((segment) => (

@@ -983,6 +983,16 @@ export function TaskDetail({
                 <footer className="composer-footer">
                   <div className="composer-footer-leading">
                     <button
+                      className="comment-mention-button"
+                      type="button"
+                      disabled={submitting || codexTargets.length === 0}
+                      aria-label="提及 Codex"
+                      title={codexTargets.length > 0 ? "提及 Codex" : "暂无可用的 Codex 目标"}
+                      onClick={() => composerRef.current?.openMentionPicker()}
+                    >
+                      @
+                    </button>
+                    <button
                       className="comment-attach-button"
                       type="button"
                       disabled={submitting}
