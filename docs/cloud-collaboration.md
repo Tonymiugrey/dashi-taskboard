@@ -137,6 +137,19 @@ CODEX_TASKBOARD_HOST=127.0.0.1 npm run codex
 
 Do not point `CODEX_TASKBOARD_URL` directly at the cloud origin for this workflow. `taskctl` talks to the loopback companion, which applies Basic Authentication and the device's local project mapping. If the companion uses a non-default loopback port, set `CODEX_TASKBOARD_COMPANION_URL` to that loopback origin.
 
+## Trigger Codex from a comment
+
+Keep the local companion running. In an issue comment, type `@` and choose a Codex target from the suggestion list. The target shows whether that device is online:
+
+- an online target claims the comment within a few seconds and starts immediately;
+- an offline target keeps the request pending until that device reconnects;
+- only the selected target claims the request, so different devices do not execute the same comment;
+- the comment shows `等待设备`, `处理中`, `已完成`, or `执行失败` as the request changes state.
+
+When the issue already has a Codex conversation, the companion resumes that conversation and sends the new comment as the next user message. It does not create a fresh Codex conversation or repeat the previous discussion. An issue without a conversation starts one the first time it is mentioned.
+
+The target ID is generated once and stored in the device's private `.data/cloud-companion.json`. Its visible name uses the Taskboard cloud login name (`Codex · LOGIN-NAME`); changing that login name updates the label without changing the target identity. Each device must map the cloud project to its own checkout before it advertises itself for that project.
+
 ## Browser-only access
 
 Either collaborator can open the deployed HTTPS Worker URL directly. The browser's native Basic Authentication prompt asks for:

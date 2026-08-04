@@ -215,6 +215,7 @@ export function createCloudProxy({
       headers.delete("host");
       headers.delete("connection");
       headers.delete("transfer-encoding");
+      headers.delete("accept-encoding");
       for (const name of [...headers.keys()]) {
         if (name.toLowerCase().startsWith("x-taskboard-user-")) headers.delete(name);
       }

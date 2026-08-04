@@ -140,6 +140,21 @@ test("cloud config only accepts HTTPS origins, except loopback HTTP used in deve
   }
 });
 
+test("cloud companion keeps one stable Codex target id for this device", async () => {
+  const { createCloudConfigStore } = await importCloudConfig();
+  const configPath = await temporaryConfigPath("device-target.json");
+  const store = createCloudConfigStore({ configPath });
+
+  const first = await store.ensureDeviceTarget("Codex · MacBook Pro");
+  const second = await store.ensureDeviceTarget("Codex · Renamed Device");
+
+  assert.match(first.deviceTarget.id, /^codex-[0-9a-f-]{36}$/);
+  assert.equal(first.deviceTarget.name, "Codex · MacBook Pro");
+  assert.equal(second.deviceTarget.id, first.deviceTarget.id);
+  assert.equal(second.deviceTarget.name, "Codex · Renamed Device");
+  assert.deepEqual((await store.read()).deviceTarget, second.deviceTarget);
+});
+
 test("cloud proxy replaces client identity with Basic Auth and makes exactly one upstream request", async () => {
   const { createCloudProxy } = await importCloudProxy();
   const calls = [];
@@ -165,6 +180,7 @@ test("cloud proxy replaces client identity with Basic Auth and makes exactly one
       method: "POST",
       headers: {
         authorization: "Bearer client-supplied-token",
+        "accept-encoding": "gzip, deflate, br, zstd",
         "content-type": "application/json",
         "x-taskboard-client": "taskctl",
         "x-taskboard-user-id": "spoofed-user",
@@ -187,6 +203,7 @@ test("cloud proxy replaces client identity with Basic Auth and makes exactly one
     `Basic ${Buffer.from("Alice:two-person-shared-key").toString("base64")}`,
   );
   assert.equal(new Headers(calls[0].init.headers).get("x-taskboard-client"), "taskctl");
+  assert.equal(new Headers(calls[0].init.headers).has("accept-encoding"), false);
   assert.equal(new Headers(calls[0].init.headers).has("x-taskboard-user-id"), false);
   assert.equal(new Headers(calls[0].init.headers).has("x-taskboard-user-name"), false);
   assert.deepEqual(await response.json(), {

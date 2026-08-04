@@ -3,12 +3,7 @@
   "name": "codex-taskboard",
   "main": "cloud/src/index.mjs",
   "compatibility_date": "2026-07-24",
-  "routes": [
-    {
-      "pattern": "taskboard.dsxzai.com",
-      "custom_domain": true
-    }
-  ],
+  "workers_dev": true,
   "assets": {
     "directory": "./dist/web",
     "binding": "ASSETS",
@@ -19,7 +14,7 @@
     {
       "binding": "DB",
       "database_name": "codex-taskboard-db",
-      "database_id": "6b90b71b-81e0-473a-a70c-470b388b7e99",
+      "database_id": "87217b4b-26bf-4aa7-8eeb-cafabba4b16a",
       "migrations_dir": "cloud/migrations"
     }
   ],

@@ -8,6 +8,7 @@ import {
   deleteAttachment,
   deleteComment,
   listAttachments,
+  listCodexTargets,
   listComments,
   uploadAttachment,
   uploadCommentAttachment,
@@ -18,6 +19,7 @@ import type {
   ActorIdentity,
   Attachment,
   Comment,
+  CodexTarget,
   DevelopmentContext,
   DevelopmentScan,
   IssueRelationType,
@@ -217,12 +219,14 @@ export function TaskDetail({
   const [comments, setComments] = useState<Comment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(true);
   const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [codexTargets, setCodexTargets] = useState<CodexTarget[]>([]);
   const [commentSegments, setCommentSegments] = useState<InlineMediaSegment[]>(
     () => createInlineMediaSegments(
       window.localStorage.getItem(`taskboard.comment-draft.${task.id}`) ?? "",
     ),
   );
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
+  const [pendingMentions, setPendingMentions] = useState<CodexTarget[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -275,6 +279,18 @@ export function TaskDetail({
     );
     return () => controller.abort();
   }, [commentsRevision, task.id]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void listCodexTargets(task.projectId, controller.signal).then(
+      setCodexTargets,
+      (error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setCodexTargets([]);
+      },
+    );
+    return () => controller.abort();
+  }, [commentsRevision, task.projectId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -406,7 +422,13 @@ export function TaskDetail({
     setSubmitting(true);
     setCommentsError(null);
     try {
-      const comment = await createComment(task.id, body);
+      const activeMentions = pendingMentions.filter((target) => body.includes(`@${target.name}`));
+      const comment = await createComment(
+        task.id,
+        body,
+        undefined,
+        activeMentions.map((target) => ({ targetId: target.id })),
+      );
       const [results, inlineAttachments] = await Promise.all([
         Promise.allSettled(
           pendingCommentFiles.map((file) => uploadCommentAttachment(comment.id, file)),
@@ -424,6 +446,7 @@ export function TaskDetail({
         : { ...comment, attachments: [...comment.attachments, ...uploaded] };
       setComments((current) => [...current, nextComment]);
       setCommentSegments(createInlineMediaSegments());
+      setPendingMentions([]);
       setPendingCommentFiles([]);
       if (commentAttachmentInputRef.current) commentAttachmentInputRef.current.value = "";
       const failed = results.length - uploaded.length;
@@ -850,6 +873,37 @@ export function TaskDetail({
                       ) : (
                         comment.body && <div className="comment-body"><DescriptionDocument value={comment.body} /></div>
                       )}
+                      {(comment.mentions ?? []).length > 0 && (
+                        <div className="codex-mention-statuses" aria-label="Codex 触发状态">
+                          {(comment.mentions ?? []).map((mention) => (
+                            <span
+                              className={`codex-mention-status is-${mention.status ?? "recorded"}`}
+                              title={mention.error ?? undefined}
+                              key={mention.targetId}
+                            >
+                              <i />
+                              {mention.targetName}
+                              <small>{mention.status === "pending"
+                                ? "等待设备"
+                                : mention.status === "claimed"
+                                  ? "处理中"
+                                  : mention.status === "completed"
+                                    ? "已完成"
+                                    : mention.status === "failed"
+                                      ? "执行失败"
+                                      : "已提及"}</small>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {(comment.mentions ?? []).find((mention) => mention.threadId)?.threadId && (
+                        <div className="codex-mention-conversation">
+                          <ConversationLink
+                            threadId={(comment.mentions ?? []).find((mention) => mention.threadId)!.threadId!}
+                            onOpen={onOpenThread}
+                          />
+                        </div>
+                      )}
                       {comment.attachments.some(
                         (attachment) => !comment.body.includes(attachmentContentUrl(attachment)),
                       ) && (
@@ -911,6 +965,12 @@ export function TaskDetail({
                   onChange={setCommentSegments}
                   onError={setCommentsError}
                   onKeyDown={handleSubmitShortcut}
+                  mentionOptions={codexTargets}
+                  onMention={(target) => setPendingMentions((current) => (
+                    current.some((candidate) => candidate.id === target.id)
+                      ? current
+                      : [...current, target]
+                  ))}
                 />
                 <PendingAttachments
                   files={pendingCommentFiles}

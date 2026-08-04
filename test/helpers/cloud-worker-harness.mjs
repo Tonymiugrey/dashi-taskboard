@@ -7,11 +7,14 @@ import { Miniflare } from "miniflare";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRY_PATH = path.join(PROJECT_ROOT, "cloud", "src", "index.mjs");
-const MIGRATION_PATH = path.join(PROJECT_ROOT, "cloud", "migrations", "0001_initial.sql");
+const MIGRATION_PATHS = [
+  path.join(PROJECT_ROOT, "cloud", "migrations", "0001_initial.sql"),
+  path.join(PROJECT_ROOT, "cloud", "migrations", "0002_codex_mentions.sql"),
+];
 
 async function requireCloudImplementation() {
   const missing = [];
-  for (const filename of [ENTRY_PATH, MIGRATION_PATH]) {
+  for (const filename of [ENTRY_PATH, ...MIGRATION_PATHS]) {
     try {
       await access(filename);
     } catch (error) {
@@ -48,7 +51,9 @@ export async function createCloudWorkerHarness({
   try {
     await miniflare.ready;
     const db = await miniflare.getD1Database("DB");
-    await db.exec(await readFile(MIGRATION_PATH, "utf8"));
+    for (const migrationPath of MIGRATION_PATHS) {
+      await db.exec(await readFile(migrationPath, "utf8"));
+    }
     const attachments = await miniflare.getR2Bucket("ATTACHMENTS");
 
     async function request(pathname, {

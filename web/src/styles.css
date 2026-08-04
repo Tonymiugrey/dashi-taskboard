@@ -3867,8 +3867,122 @@ kbd {
 }
 
 .comment-inline-media {
+  position: relative;
   min-height: 106px;
   padding: 10px 16px 14px;
+}
+
+.codex-mention-menu {
+  position: absolute;
+  z-index: 20;
+  right: 12px;
+  bottom: 8px;
+  left: 12px;
+  overflow: hidden;
+  padding: 5px;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-raised, var(--surface));
+  box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
+}
+
+.codex-mention-menu-title {
+  padding: 5px 7px 6px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 620;
+  letter-spacing: .02em;
+}
+
+.codex-mention-menu button {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.codex-mention-menu button.is-selected,
+.codex-mention-menu button:hover {
+  background: var(--surface-hover);
+}
+
+.codex-mention-menu button strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-mention-menu button > span:last-child {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.codex-target-presence {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.codex-target-presence.is-online {
+  background: #35b86b;
+  box-shadow: 0 0 0 2px rgb(53 184 107 / 14%);
+}
+
+.codex-mention-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 16px 12px;
+}
+
+.codex-mention-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.codex-mention-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.codex-mention-status small {
+  color: var(--text-tertiary);
+  font-size: inherit;
+}
+
+.codex-mention-status.is-claimed i {
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.codex-mention-status.is-completed i {
+  background: #35b86b;
+}
+
+.codex-mention-status.is-failed i {
+  background: var(--danger);
+}
+
+.codex-mention-conversation {
+  padding: 0 16px 12px;
 }
 
 .comment-inline-media textarea {

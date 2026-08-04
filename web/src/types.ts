@@ -229,9 +229,25 @@ export interface Comment {
   authorAvatarUrl: string | null;
   threadId: string | null;
   attachments: Attachment[];
+  mentions?: CodexMention[];
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CodexTarget {
+  id: string;
+  name: string;
+  online: boolean;
+  lastSeenAt: string;
+}
+
+export interface CodexMention {
+  targetId: string;
+  targetName: string;
+  status: "pending" | "claimed" | "completed" | "failed" | null;
+  threadId: string | null;
+  error: string | null;
 }
 
 export interface Attachment {

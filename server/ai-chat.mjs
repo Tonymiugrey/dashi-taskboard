@@ -1,9 +1,14 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { ApiError } from "./database.mjs";
-import { discoverAiCatalog, resolveAiWorkspace } from "./ai-chat-catalog.mjs";
+import {
+  discoverAiCatalog,
+  discoverAiCatalogAtWorkspace,
+  loadDeviceWorkspaces,
+  resolveAiWorkspace,
+} from "./ai-chat-catalog.mjs";
 import {
   buildCodexArgs,
   buildCodexPrompt,
@@ -150,6 +155,39 @@ export class AiChatService {
     });
   }
 
+  async createResolvedThread(input) {
+    const workspacePath = await realpath(input.workspacePath);
+    if (!(await stat(workspacePath)).isDirectory()) {
+      throw new ApiError(409, "PROJECT_WORKSPACE_UNAVAILABLE", "Project workspace is unavailable");
+    }
+    const catalog = await discoverAiCatalogAtWorkspace({
+      codexExecutable: this.codexExecutable,
+      workspacePath,
+      processEnv: this.processEnv,
+    });
+    const model = this.#resolveModel(catalog, input.model);
+    const reasoningEffort = input.reasoningEffort ?? model.defaultReasoningEffort;
+    this.#validateReasoningEffort(model, reasoningEffort);
+    const sandbox = input.sandbox ?? "workspace-write";
+    this.#validateSandbox(sandbox);
+    return this.database.createAiChatThread({
+      title: input.title ?? input.issue?.identifier ?? "Codex mention",
+      origin: {
+        projectId: input.project.id,
+        projectName: input.project.name,
+        workspacePath,
+        ...(input.issue ? {
+          issueId: input.issue.id,
+          issueIdentifier: input.issue.identifier,
+        } : {}),
+      },
+      codexThreadId: input.codexThreadId ?? null,
+      model: model.slug,
+      reasoningEffort,
+      sandbox,
+    });
+  }
+
   async updateThread(threadId, changes) {
     let thread = this.getThread(threadId);
     const changesSettings = ["model", "reasoningEffort", "sandbox"].some(
@@ -206,10 +244,23 @@ export class AiChatService {
       );
     }
 
-    const [catalog, resolved] = await Promise.all([
-      this.getCatalog(thread.origin.projectId),
-      resolveAiWorkspace(thread.origin.projectId, this.codexStatePath, this.database),
-    ]);
+    const localProject = this.database.getProject(thread.origin.projectId);
+    const [catalog, resolved] = localProject
+      ? await Promise.all([
+          this.getCatalog(thread.origin.projectId),
+          resolveAiWorkspace(thread.origin.projectId, this.codexStatePath, this.database),
+        ])
+      : await (async () => {
+          const cloudResolved = await this.#resolveThreadWorkspace(thread);
+          return [
+            await discoverAiCatalogAtWorkspace({
+              codexExecutable: this.codexExecutable,
+              workspacePath: cloudResolved.workspacePath,
+              processEnv: this.processEnv,
+            }),
+            cloudResolved,
+          ];
+        })();
 
     thread = this.getThread(threadId);
     if (this.#threadIsActive(thread)) {
@@ -390,6 +441,12 @@ export class AiChatService {
     return this.getRun(runId);
   }
 
+  async waitForRun(runId) {
+    const completion = this.completions.get(runId);
+    if (completion) await completion;
+    return this.getRun(runId);
+  }
+
   async close() {
     const entries = [...this.active.entries()];
     for (const [, active] of entries) {
@@ -477,6 +534,28 @@ export class AiChatService {
         "'skillIds' must contain at most 20 skill ids",
       );
     }
+  }
+
+  async #resolveThreadWorkspace(thread) {
+    if (this.database.getProject(thread.origin.projectId)) {
+      return resolveAiWorkspace(thread.origin.projectId, this.codexStatePath, this.database);
+    }
+    let workspacePath;
+    try {
+      workspacePath = await realpath(thread.origin.workspacePath);
+      if (!(await stat(workspacePath)).isDirectory()) throw new Error("not a directory");
+    } catch {
+      throw new ApiError(
+        409,
+        "PROJECT_WORKSPACE_UNAVAILABLE",
+        `Project '${thread.origin.projectId}' has no available device workspace`,
+      );
+    }
+    const workspaces = await loadDeviceWorkspaces(this.codexStatePath, this.database);
+    return {
+      workspacePath,
+      addDirectories: [...new Set(workspaces.values())].filter((candidate) => candidate !== workspacePath),
+    };
   }
 
   async #writeTurnAttachments(attachments) {

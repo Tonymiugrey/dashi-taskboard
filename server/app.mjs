@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
@@ -18,6 +19,7 @@ import {
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
+import { CodexMentionDispatcher } from "./codex-mention-dispatcher.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
@@ -1274,6 +1276,7 @@ export function resolveServerOptions(options = {}) {
     ? path.resolve(configuredDataDirectory)
     : path.join(PROJECT_ROOT, ".data");
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const bundledCodexExecutable = "/Applications/ChatGPT.app/Contents/Resources/codex";
   return {
     dataDirectory,
     databasePath: options.databasePath ?? path.join(dataDirectory, "taskboard.sqlite"),
@@ -1281,7 +1284,9 @@ export function resolveServerOptions(options = {}) {
     cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
-    codexExecutable: options.codexExecutable ?? process.env.CODEX_EXECUTABLE ?? "codex",
+    codexExecutable: options.codexExecutable
+      ?? process.env.CODEX_EXECUTABLE
+      ?? (existsSync(bundledCodexExecutable) ? bundledCodexExecutable : "codex"),
     codexStatePath: options.codexStatePath
       ?? path.join(codexHome, ".codex-global-state.json"),
     codexProcessesPath: options.codexProcessesPath
@@ -1332,6 +1337,15 @@ export function createTaskboardServer(options = {}) {
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
   });
+  const mentionDispatcher = options.mentionDispatcher ?? (
+    options.remoteFetch === undefined && typeof cloudConfig.ensureDeviceTarget === "function"
+      ? new CodexMentionDispatcher({
+          configStore: cloudConfig,
+          cloudProxy,
+          aiChat,
+        })
+      : null
+  );
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -2047,6 +2061,7 @@ export function createTaskboardServer(options = {}) {
   return {
     database,
     aiChat,
+    mentionDispatcher,
     server,
     options: resolved,
     async listen({ host = "127.0.0.1", port = resolvePort() } = {}) {
@@ -2067,6 +2082,7 @@ export function createTaskboardServer(options = {}) {
         server.listen(port, host);
       });
       listening = true;
+      mentionDispatcher?.start();
       return server.address();
     },
     async close() {
@@ -2076,6 +2092,7 @@ export function createTaskboardServer(options = {}) {
           })
         : Promise.resolve();
       events.close();
+      mentionDispatcher?.stop();
       for (const response of aiEventResponses) response.end();
       aiEventResponses.clear();
       await aiChat.close();

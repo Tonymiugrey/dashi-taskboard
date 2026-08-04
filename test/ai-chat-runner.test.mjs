@@ -240,6 +240,32 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
   }
 });
 
+test("a cloud issue can resume its existing Codex thread from a device workspace mapping", async () => {
+  const fixture = await createFixture();
+  try {
+    const thread = await fixture.service.createResolvedThread({
+      project: { id: "cloud-project", name: "Cloud Project" },
+      issue: { id: "cloud-task", identifier: "CLOUD-9" },
+      workspacePath: fixture.workspace,
+      codexThreadId: "existing-cloud-thread",
+      model: "gpt-real",
+      reasoningEffort: "medium",
+      sandbox: "workspace-write",
+    });
+    const run = await fixture.service.startTurn(thread.id, {
+      message: "Only this review comment",
+    });
+    assert.equal((await fixture.service.waitForRun(run.id)).status, "completed");
+
+    const capture = JSON.parse((await readFile(fixture.capturePath, "utf8")).trim());
+    assert.deepEqual(capture.args.slice(-3), ["resume", "existing-cloud-thread", "-"]);
+    assert.match(capture.prompt, /<user_message>\nOnly this review comment\n<\/user_message>/);
+    assert.equal(fixture.service.getThread(thread.id).codexThreadId, "existing-cloud-thread");
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("same-thread turns are locked, different threads run concurrently, failures and interrupts settle", async () => {
   const fixture = await createFixture();
   try {

@@ -1,0 +1,12 @@
+CREATE TABLE codex_targets (id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE codex_target_projects (target_id TEXT NOT NULL REFERENCES codex_targets(id) ON DELETE CASCADE, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, PRIMARY KEY (target_id, project_id));
+CREATE INDEX codex_target_projects_project ON codex_target_projects(project_id, target_id);
+CREATE TABLE comment_mentions (comment_id TEXT NOT NULL REFERENCES comments(id) ON DELETE CASCADE, target_id TEXT NOT NULL REFERENCES codex_targets(id) ON DELETE RESTRICT, target_name TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (comment_id, target_id));
+CREATE TABLE codex_trigger_deliveries (comment_id TEXT NOT NULL REFERENCES comments(id) ON DELETE CASCADE, target_id TEXT NOT NULL REFERENCES codex_targets(id) ON DELETE CASCADE, status TEXT NOT NULL CHECK (status IN ('pending', 'claimed', 'completed', 'failed')), claim_token TEXT, claimed_at TEXT, lease_expires_at TEXT, completed_at TEXT, thread_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (comment_id, target_id));
+CREATE INDEX codex_trigger_deliveries_claim ON codex_trigger_deliveries(target_id, status, created_at, comment_id);
+CREATE TRIGGER codex_targets_revision_insert AFTER INSERT ON codex_targets BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER codex_targets_revision_update AFTER UPDATE ON codex_targets BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER codex_targets_revision_delete AFTER DELETE ON codex_targets BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER comment_mentions_revision_insert AFTER INSERT ON comment_mentions BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER comment_mentions_revision_delete AFTER DELETE ON comment_mentions BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER codex_trigger_deliveries_revision_update AFTER UPDATE ON codex_trigger_deliveries BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;

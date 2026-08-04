@@ -8,6 +8,7 @@ import type {
   AiChatThreadSnapshot,
   Attachment,
   Comment,
+  CodexTarget,
   DevelopmentScan,
   IssueRelationType,
   Project,
@@ -380,12 +381,30 @@ export async function listComments(taskId: string, signal?: AbortSignal): Promis
   return data.comments;
 }
 
-export async function createComment(taskId: string, body: string, threadId?: string): Promise<Comment> {
+export async function listCodexTargets(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<CodexTarget[]> {
+  const query = new URLSearchParams({ projectId });
+  const data = await request<{ targets: CodexTarget[] }>(`/api/codex-targets?${query}`, { signal });
+  return data.targets;
+}
+
+export async function createComment(
+  taskId: string,
+  body: string,
+  threadId?: string,
+  mentions: Array<{ targetId: string }> = [],
+): Promise<Comment> {
   const data = await request<{ comment: Comment }>(
     `/api/tasks/${encodeURIComponent(taskId)}/comments`,
     {
       method: "POST",
-      body: JSON.stringify({ body, ...(threadId ? { threadId } : {}) }),
+      body: JSON.stringify({
+        body,
+        ...(threadId ? { threadId } : {}),
+        ...(mentions.length > 0 ? { mentions } : {}),
+      }),
     },
   );
   return data.comment;

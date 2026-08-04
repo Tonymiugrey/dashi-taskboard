@@ -539,7 +539,7 @@ function taskRelationSummaryFromRow(row) {
   };
 }
 
-function commentFromRow(row, attachments = []) {
+function commentFromRow(row, attachments = [], mentions = []) {
   return {
     id: row.id,
     taskId: row.task_id,
@@ -550,6 +550,7 @@ function commentFromRow(row, attachments = []) {
     authorName: row.author_name,
     authorAvatarUrl: row.author_avatar_url,
     attachments,
+    mentions,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -621,7 +622,30 @@ async function attachmentsForComment(env, commentId) {
 }
 
 async function hydrateComment(env, row) {
-  return commentFromRow(row, await attachmentsForComment(env, row.id));
+  const [attachments, mentionRows] = await Promise.all([
+    attachmentsForComment(env, row.id),
+    all(env.DB.prepare(`
+      SELECT
+        comment_mentions.target_id,
+        comment_mentions.target_name,
+        codex_trigger_deliveries.status,
+        codex_trigger_deliveries.thread_id,
+        codex_trigger_deliveries.error
+      FROM comment_mentions
+      LEFT JOIN codex_trigger_deliveries
+        ON codex_trigger_deliveries.comment_id = comment_mentions.comment_id
+        AND codex_trigger_deliveries.target_id = comment_mentions.target_id
+      WHERE comment_mentions.comment_id = ?
+      ORDER BY comment_mentions.created_at, comment_mentions.target_id
+    `).bind(row.id)),
+  ]);
+  return commentFromRow(row, attachments, mentionRows.map((mention) => ({
+    targetId: mention.target_id,
+    targetName: mention.target_name,
+    status: mention.status,
+    threadId: mention.thread_id,
+    error: mention.error,
+  })));
 }
 
 async function hydrateTask(env, row) {
@@ -809,10 +833,71 @@ function parseVersionMutation(body) {
 
 function parseCommentCreate(body) {
   assertPlainObject(body);
-  assertAllowedKeys(body, new Set(["body", "threadId"]));
+  assertAllowedKeys(body, new Set(["body", "threadId", "mentions"]));
   return {
     body: stringField(body.body ?? "", "body", { maxLength: 100_000 }),
     threadId: parseThreadId(body.threadId),
+    mentions: parseCodexMentions(body.mentions),
+  };
+}
+
+function parseCodexTargetId(value, name = "targetId") {
+  const id = stringField(value, name, { required: true, maxLength: 128 });
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(id)) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be an identifier`);
+  }
+  return id;
+}
+
+function parseCodexMentions(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new ApiError(400, "INVALID_FIELD", "'mentions' must contain at most 8 targets");
+  }
+  const mentions = value.map((mention, index) => {
+    assertPlainObject(mention);
+    assertAllowedKeys(mention, new Set(["targetId"]));
+    return { targetId: parseCodexTargetId(mention.targetId, `mentions[${index}].targetId`) };
+  });
+  if (new Set(mentions.map((mention) => mention.targetId)).size !== mentions.length) {
+    throw new ApiError(400, "INVALID_FIELD", "'mentions' cannot contain duplicate targets");
+  }
+  return mentions;
+}
+
+function parseCodexTargetHeartbeat(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["id", "name", "projectIds"]));
+  if (!Array.isArray(body.projectIds) || body.projectIds.length > 100) {
+    throw new ApiError(400, "INVALID_FIELD", "'projectIds' must contain at most 100 projects");
+  }
+  const projectIds = body.projectIds.map((projectId, index) => (
+    validateProjectId(stringField(projectId, `projectIds[${index}]`, {
+      required: true,
+      maxLength: 64,
+    }))
+  ));
+  if (new Set(projectIds).size !== projectIds.length) {
+    throw new ApiError(400, "INVALID_FIELD", "'projectIds' cannot contain duplicates");
+  }
+  return {
+    id: parseCodexTargetId(body.id, "id"),
+    name: stringField(body.name, "name", { required: true, maxLength: 120 }),
+    projectIds,
+  };
+}
+
+function parseCodexTriggerResult(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["claimToken", "status", "threadId", "error"]));
+  if (body.status !== "completed" && body.status !== "failed") {
+    throw new ApiError(400, "INVALID_FIELD", "'status' must be completed or failed");
+  }
+  return {
+    claimToken: stringField(body.claimToken, "claimToken", { required: true, maxLength: 128 }),
+    status: body.status,
+    threadId: parseThreadId(body.threadId),
+    error: stringField(body.error ?? null, "error", { nullable: true, maxLength: 4_000 }),
   };
 }
 
@@ -1638,6 +1723,24 @@ async function createComment(env, taskId, input, actor) {
   const task = await requireTaskRow(env, taskId);
   const id = uuid();
   const timestamp = now();
+  const mentionedTargets = [];
+  for (const mention of input.mentions) {
+    const target = await env.DB.prepare(`
+      SELECT codex_targets.id, codex_targets.name
+      FROM codex_targets
+      JOIN codex_target_projects
+        ON codex_target_projects.target_id = codex_targets.id
+      WHERE codex_targets.id = ? AND codex_target_projects.project_id = ?
+    `).bind(mention.targetId, task.project_id).first();
+    if (!target) {
+      throw new ApiError(
+        400,
+        "CODEX_TARGET_UNAVAILABLE",
+        `Codex target '${mention.targetId}' is not available for this project`,
+      );
+    }
+    mentionedTargets.push(target);
+  }
   await env.DB.prepare(`
     INSERT INTO comments (
       id, task_id, body, thread_id, author_type, author_id, author_name,
@@ -1655,7 +1758,157 @@ async function createComment(env, taskId, input, actor) {
     timestamp,
     timestamp,
   ).run();
+  for (const target of mentionedTargets) {
+    await env.DB.prepare(`
+      INSERT INTO comment_mentions (comment_id, target_id, target_name, created_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(id, target.id, target.name, timestamp).run();
+    if (actor.type === "user") {
+      await env.DB.prepare(`
+        INSERT INTO codex_trigger_deliveries (
+          comment_id, target_id, status, created_at, updated_at
+        ) VALUES (?, ?, 'pending', ?, ?)
+      `).bind(id, target.id, timestamp, timestamp).run();
+    }
+  }
   const row = await env.DB.prepare("SELECT * FROM comments WHERE id = ?").bind(id).first();
+  return hydrateComment(env, row);
+}
+
+async function listCodexTargets(env, projectId) {
+  await requireProject(env, projectId);
+  const rows = await all(env.DB.prepare(`
+    SELECT codex_targets.*
+    FROM codex_targets
+    JOIN codex_target_projects
+      ON codex_target_projects.target_id = codex_targets.id
+    WHERE codex_target_projects.project_id = ?
+    ORDER BY codex_targets.name COLLATE NOCASE, codex_targets.id
+  `).bind(projectId));
+  const onlineAfter = Date.now() - 45_000;
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    online: new Date(row.last_seen_at).getTime() >= onlineAfter,
+    lastSeenAt: row.last_seen_at,
+  }));
+}
+
+async function heartbeatCodexTarget(env, input) {
+  for (const projectId of input.projectIds) await requireProject(env, projectId);
+  const timestamp = now();
+  const statements = [
+    env.DB.prepare(`
+      INSERT INTO codex_targets (id, name, last_seen_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        last_seen_at = excluded.last_seen_at,
+        updated_at = excluded.updated_at
+    `).bind(input.id, input.name, timestamp, timestamp, timestamp),
+    env.DB.prepare("DELETE FROM codex_target_projects WHERE target_id = ?").bind(input.id),
+    ...input.projectIds.map((projectId) => env.DB.prepare(`
+      INSERT INTO codex_target_projects (target_id, project_id) VALUES (?, ?)
+    `).bind(input.id, projectId)),
+  ];
+  await env.DB.batch(statements);
+  return {
+    target: {
+      id: input.id,
+      name: input.name,
+      online: true,
+      lastSeenAt: timestamp,
+    },
+  };
+}
+
+async function claimCodexTrigger(env, targetId) {
+  const target = await env.DB.prepare("SELECT id FROM codex_targets WHERE id = ?")
+    .bind(targetId)
+    .first();
+  if (!target) {
+    throw new ApiError(404, "CODEX_TARGET_NOT_FOUND", `Codex target '${targetId}' does not exist`);
+  }
+  const timestamp = now();
+  const row = await env.DB.prepare(`
+    SELECT codex_trigger_deliveries.comment_id
+    FROM codex_trigger_deliveries
+    WHERE target_id = ?
+      AND (
+        status = 'pending'
+        OR (status = 'claimed' AND lease_expires_at < ?)
+      )
+    ORDER BY created_at, comment_id
+    LIMIT 1
+  `).bind(targetId, timestamp).first();
+  if (!row) return null;
+
+  const claimToken = uuid();
+  const leaseExpiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+  const result = await env.DB.prepare(`
+    UPDATE codex_trigger_deliveries
+    SET
+      status = 'claimed',
+      claim_token = ?,
+      claimed_at = ?,
+      lease_expires_at = ?,
+      updated_at = ?
+    WHERE comment_id = ? AND target_id = ?
+      AND (
+        status = 'pending'
+        OR (status = 'claimed' AND lease_expires_at < ?)
+      )
+  `).bind(
+    claimToken,
+    timestamp,
+    leaseExpiresAt,
+    timestamp,
+    row.comment_id,
+    targetId,
+    timestamp,
+  ).run();
+  if (!changed(result)) return null;
+
+  const commentRow = await requireCommentRow(env, row.comment_id);
+  const taskRowValue = await requireTaskRow(env, commentRow.task_id);
+  const projectRow = await requireProject(env, taskRowValue.project_id);
+  return {
+    targetId,
+    claimToken,
+    leaseExpiresAt,
+    project: projectFromRow(projectRow),
+    task: await hydrateTask(env, taskRowValue),
+    comment: await hydrateComment(env, commentRow),
+  };
+}
+
+async function finishCodexTrigger(env, commentId, targetId, input) {
+  const timestamp = now();
+  const result = await env.DB.prepare(`
+    UPDATE codex_trigger_deliveries
+    SET
+      status = ?,
+      thread_id = ?,
+      error = ?,
+      completed_at = ?,
+      lease_expires_at = NULL,
+      updated_at = ?
+    WHERE comment_id = ? AND target_id = ?
+      AND status = 'claimed' AND claim_token = ?
+  `).bind(
+    input.status,
+    input.threadId ?? null,
+    input.status === "failed" ? input.error : null,
+    timestamp,
+    timestamp,
+    commentId,
+    targetId,
+    input.claimToken,
+  ).run();
+  if (!changed(result)) {
+    throw new ApiError(409, "CODEX_TRIGGER_CLAIM_LOST", "This Codex trigger is no longer claimed by this device");
+  }
+  const row = await requireCommentRow(env, commentId);
   return hydrateComment(env, row);
 }
 
@@ -1902,6 +2155,54 @@ async function routeApi(request, env, actor, url) {
       SELECT revision FROM global_revision WHERE singleton = 1
     `).first("revision");
     return json(200, { changed: revision > since, revision });
+  }
+
+  if (pathname === "/api/codex-targets") {
+    if (request.method !== "GET") methodNotAllowed(["GET"]);
+    const unknown = [...url.searchParams.keys()].filter((key) => key !== "projectId");
+    if (unknown.length > 0 || url.searchParams.getAll("projectId").length !== 1) {
+      throw new ApiError(400, "INVALID_QUERY_PARAMETER", "'projectId' must be provided once");
+    }
+    const projectId = validateProjectId(url.searchParams.get("projectId"));
+    return json(200, { targets: await listCodexTargets(env, projectId) });
+  }
+
+  if (pathname === "/api/codex-targets/heartbeat") {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "Codex target heartbeat");
+    return json(200, await heartbeatCodexTarget(env, parseCodexTargetHeartbeat(await readJson(request))));
+  }
+
+  const codexTargetClaimMatch = pathname.match(
+    /^\/api\/codex-targets\/([^/]+)\/triggers\/claim$/,
+  );
+  if (codexTargetClaimMatch) {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "Codex trigger claim");
+    const targetId = parseCodexTargetId(
+      decodePathPart(codexTargetClaimMatch[1], "Codex target id"),
+      "targetId",
+    );
+    return json(200, { trigger: await claimCodexTrigger(env, targetId) });
+  }
+
+  const codexTriggerMatch = pathname.match(/^\/api\/codex-triggers\/([^/]+)\/([^/]+)$/);
+  if (codexTriggerMatch) {
+    if (request.method !== "PATCH") methodNotAllowed(["PATCH"]);
+    requireNoQuery(url, "Codex trigger result");
+    const commentId = decodePathPart(codexTriggerMatch[1], "Comment id");
+    const targetId = parseCodexTargetId(
+      decodePathPart(codexTriggerMatch[2], "Codex target id"),
+      "targetId",
+    );
+    return json(200, {
+      comment: await finishCodexTrigger(
+        env,
+        commentId,
+        targetId,
+        parseCodexTriggerResult(await readJson(request)),
+      ),
+    });
   }
 
   if (

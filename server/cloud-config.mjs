@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -97,13 +98,33 @@ function parseConfig(value) {
     "actorName",
     "sharedKey",
     "projectMappings",
+    "deviceTarget",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
     throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud companion configuration is invalid");
   }
   const projectMappings = validateProjectMappings(value.projectMappings);
+  let deviceTarget = null;
+  if (value.deviceTarget !== undefined && value.deviceTarget !== null) {
+    if (
+      typeof value.deviceTarget !== "object"
+      || Array.isArray(value.deviceTarget)
+      || !/^[a-z0-9][a-z0-9-]{0,127}$/i.test(value.deviceTarget.id ?? "")
+      || typeof value.deviceTarget.name !== "string"
+      || !value.deviceTarget.name.trim()
+      || value.deviceTarget.name.length > 120
+      || Object.keys(value.deviceTarget).some((key) => key !== "id" && key !== "name")
+    ) {
+      throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud device target is invalid");
+    }
+    deviceTarget = { id: value.deviceTarget.id, name: value.deviceTarget.name.trim() };
+  }
   if (value.remoteUrl === null && value.actorName === null && value.sharedKey === null) {
-    return { ...emptyConfig(), projectMappings };
+    return {
+      ...emptyConfig(),
+      projectMappings,
+      ...(deviceTarget ? { deviceTarget } : {}),
+    };
   }
   const credentials = validateCredentials(value.actorName, value.sharedKey);
   return {
@@ -111,6 +132,7 @@ function parseConfig(value) {
     remoteUrl: normalizeCloudUrl(value.remoteUrl),
     ...credentials,
     projectMappings,
+    ...(deviceTarget ? { deviceTarget } : {}),
   };
 }
 
@@ -181,6 +203,18 @@ export function createCloudConfigStore({ configPath }) {
         projectMappings: {
           ...config.projectMappings,
           [projectId]: workspacePath,
+        },
+      }));
+    },
+    ensureDeviceTarget(name) {
+      if (typeof name !== "string" || !name.trim() || name.length > 120) {
+        throw new CloudConfigError("INVALID_DEVICE_TARGET", "Device target name is invalid");
+      }
+      return update((config) => ({
+        ...config,
+        deviceTarget: {
+          id: config.deviceTarget?.id ?? `codex-${randomUUID()}`,
+          name: name.trim(),
         },
       }));
     },

@@ -153,6 +153,83 @@ test("projects, tasks, comments, relations, and workflows preserve the current A
   assert.ok(listed.body.tasks.some((task) => task.id === child.body.task.id));
 });
 
+test("structured Codex mentions target one online device and create one claimable trigger", async () => {
+  await createProject("mentions");
+  const target = {
+    id: "device-macbook-pro",
+    name: "Codex · MacBook Pro",
+    projectIds: ["mentions"],
+  };
+  const heartbeat = await cloud.request("/api/codex-targets/heartbeat", {
+    method: "POST",
+    actorName: alice,
+    json: target,
+  });
+  assert.equal(heartbeat.response.status, 200);
+  assert.equal(heartbeat.body.target.id, target.id);
+  assert.equal(heartbeat.body.target.online, true);
+
+  const listed = await cloud.request("/api/codex-targets?projectId=mentions", {
+    actorName: bob,
+  });
+  assert.equal(listed.response.status, 200);
+  assert.deepEqual(listed.body.targets.map(({ id, name, online }) => ({ id, name, online })), [{
+    id: target.id,
+    name: target.name,
+    online: true,
+  }]);
+
+  const task = await createTask("mentions", "Apply review feedback");
+  const comment = await cloud.request(`/api/tasks/${task.body.task.id}/comments`, {
+    method: "POST",
+    actorName: bob,
+    json: {
+      body: "@Codex · MacBook Pro 请按最新意见返工",
+      mentions: [{ targetId: target.id }],
+    },
+  });
+  assert.equal(comment.response.status, 201);
+  assert.deepEqual(comment.body.comment.mentions, [{
+    targetId: target.id,
+    targetName: target.name,
+    status: "pending",
+    threadId: null,
+    error: null,
+  }]);
+
+  const claimed = await cloud.request(`/api/codex-targets/${target.id}/triggers/claim`, {
+    method: "POST",
+    actorName: alice,
+  });
+  assert.equal(claimed.response.status, 200);
+  assert.equal(claimed.body.trigger.comment.id, comment.body.comment.id);
+  assert.equal(claimed.body.trigger.task.id, task.body.task.id);
+  assert.equal(claimed.body.trigger.project.id, "mentions");
+
+  const noDuplicate = await cloud.request(`/api/codex-targets/${target.id}/triggers/claim`, {
+    method: "POST",
+    actorName: alice,
+  });
+  assert.equal(noDuplicate.response.status, 200);
+  assert.equal(noDuplicate.body.trigger, null);
+
+  const completed = await cloud.request(
+    `/api/codex-triggers/${comment.body.comment.id}/${target.id}`,
+    {
+      method: "PATCH",
+      actorName: alice,
+      json: {
+        claimToken: claimed.body.trigger.claimToken,
+        status: "completed",
+        threadId: "codex-thread-1",
+      },
+    },
+  );
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.comment.mentions[0].status, "completed");
+  assert.equal(completed.body.comment.mentions[0].threadId, "codex-thread-1");
+});
+
 test("concurrent issue creation has unique identifiers and stale writes return 409", async () => {
   const created = await Promise.all(
     Array.from({ length: 25 }, (_, index) => createTask("alpha", `Concurrent ${index}`)),

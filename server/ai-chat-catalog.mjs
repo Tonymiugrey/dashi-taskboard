@@ -237,6 +237,18 @@ export async function discoverAiCatalog({
   processEnv,
 }) {
   const { workspacePath } = await resolveAiWorkspace(projectId, codexStatePath, database);
+  return discoverAiCatalogAtWorkspace({
+    codexExecutable,
+    workspacePath,
+    processEnv,
+  });
+}
+
+export async function discoverAiCatalogAtWorkspace({
+  codexExecutable,
+  workspacePath,
+  processEnv,
+}) {
   const [modelResult, skillEntries] = await Promise.all([
     execFileAsync(codexExecutable, ["debug", "models"], {
       cwd: workspacePath,

@@ -5,9 +5,11 @@ import {
   useRef,
   useState,
   type ClipboardEvent,
+  type KeyboardEvent,
   type KeyboardEventHandler,
 } from "react";
 import type { Attachment } from "../types";
+import type { CodexTarget } from "../types";
 import { attachmentContentUrl } from "../api";
 import { clipboardImages, fileKey, MAX_ATTACHMENT_SIZE } from "./PendingAttachments";
 import { LinearIcon } from "./LinearIcon";
@@ -41,6 +43,8 @@ interface InlineMediaComposerProps {
   onChange: (segments: InlineMediaSegment[]) => void;
   onError: (message: string | null) => void;
   onKeyDown?: KeyboardEventHandler<HTMLTextAreaElement>;
+  mentionOptions?: CodexTarget[];
+  onMention?: (target: CodexTarget) => void;
 }
 
 let segmentSequence = 0;
@@ -165,9 +169,18 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     onChange,
     onError,
     onKeyDown,
+    mentionOptions = [],
+    onMention,
   }, ref) {
     const textareas = useRef(new Map<string, HTMLTextAreaElement>());
     const pendingFocus = useRef<{ id: string; offset: number } | null>(null);
+    const [mentionMenu, setMentionMenu] = useState<{
+      segmentId: string;
+      start: number;
+      end: number;
+      query: string;
+      selectedIndex: number;
+    } | null>(null);
 
     useLayoutEffect(() => {
       for (const element of textareas.current.values()) resizeTextarea(element);
@@ -187,10 +200,71 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       },
     }), [segments]);
 
-    function changeText(id: string, text: string) {
+    function changeText(id: string, text: string, cursor: number) {
       onChange(segments.map((segment) => (
         segment.id === id && segment.type === "text" ? { ...segment, text } : segment
       )));
+      const before = text.slice(0, cursor);
+      const match = before.match(/(?:^|\s)(@([^\s@]{0,120}))$/);
+      if (!match || mentionOptions.length === 0) {
+        setMentionMenu(null);
+        return;
+      }
+      setMentionMenu({
+        segmentId: id,
+        start: cursor - match[1].length,
+        end: cursor,
+        query: match[2],
+        selectedIndex: 0,
+      });
+    }
+
+    const filteredMentions = mentionMenu
+      ? mentionOptions.filter((target) => target.name.toLocaleLowerCase().includes(
+          mentionMenu.query.toLocaleLowerCase(),
+        ))
+      : [];
+
+    function chooseMention(target: CodexTarget) {
+      if (!mentionMenu) return;
+      const segment = segments.find((candidate) => (
+        candidate.id === mentionMenu.segmentId && candidate.type === "text"
+      ));
+      if (!segment || segment.type !== "text") return;
+      const replacement = `@${target.name} `;
+      const text = `${segment.text.slice(0, mentionMenu.start)}${replacement}${segment.text.slice(mentionMenu.end)}`;
+      const cursor = mentionMenu.start + replacement.length;
+      pendingFocus.current = { id: segment.id, offset: cursor };
+      onChange(segments.map((candidate) => candidate.id === segment.id ? { ...segment, text } : candidate));
+      onMention?.(target);
+      setMentionMenu(null);
+    }
+
+    function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+      if (mentionMenu && filteredMentions.length > 0) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const direction = event.key === "ArrowDown" ? 1 : -1;
+          setMentionMenu((current) => current ? {
+            ...current,
+            selectedIndex: (
+              current.selectedIndex + direction + filteredMentions.length
+            ) % filteredMentions.length,
+          } : null);
+          return;
+        }
+        if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) {
+          event.preventDefault();
+          chooseMention(filteredMentions[mentionMenu.selectedIndex] ?? filteredMentions[0]);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setMentionMenu(null);
+          return;
+        }
+      }
+      onKeyDown?.(event);
     }
 
     function pasteImages(
@@ -254,11 +328,16 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
               aria-label={index === 0 ? ariaLabel : `${ariaLabel}续写`}
               placeholder={isEmpty && index === 0 ? placeholder : undefined}
               onChange={(event) => {
-                changeText(segment.id, event.target.value);
+                changeText(segment.id, event.target.value, event.target.selectionStart);
                 resizeTextarea(event.currentTarget);
               }}
               onPaste={(event) => pasteImages(event, segment)}
-              onKeyDown={onKeyDown}
+              onKeyDown={handleKeyDown}
+              onBlur={(event) => {
+                if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) {
+                  setMentionMenu(null);
+                }
+              }}
             />
           ) : (
             <PendingImageBlock
@@ -269,6 +348,26 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
             />
           )
         ))}
+        {mentionMenu && filteredMentions.length > 0 && (
+          <div className="codex-mention-menu" role="listbox" aria-label="选择 Codex 目标">
+            <div className="codex-mention-menu-title">发送给 Codex</div>
+            {filteredMentions.map((target, index) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={index === mentionMenu.selectedIndex}
+                className={index === mentionMenu.selectedIndex ? "is-selected" : ""}
+                key={target.id}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => chooseMention(target)}
+              >
+                <span className={`codex-target-presence ${target.online ? "is-online" : ""}`} />
+                <strong>{target.name}</strong>
+                <span>{target.online ? "在线，立即处理" : "离线，上线后处理"}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     );
   },
