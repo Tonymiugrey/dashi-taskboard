@@ -94,6 +94,12 @@ export function summarizeTaskboardAutomationReadiness(tasks, checkedAt = Date.no
   };
 }
 
+export function shouldRunTaskboardAutomation(request, quota, readiness) {
+  return request.enabledByUser
+    && (!request.quotaAware || quota?.state !== "blocked")
+    && readiness?.state === "runnable";
+}
+
 export function buildTaskboardAutomationSpec(request) {
   return {
     kind: "cron",

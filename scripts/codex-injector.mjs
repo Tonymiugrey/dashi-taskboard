@@ -10,6 +10,7 @@ import { resolvePort } from "../server/app.mjs";
 import {
   parseTaskboardAutomationHostRequest,
   reconcileTaskboardAutomation,
+  shouldRunTaskboardAutomation,
   summarizeTaskboardAutomationReadiness,
 } from "../shared/taskboard-automation.mjs";
 import {
@@ -603,9 +604,7 @@ async function applyTaskboardAutomationPolicy(request, rpc, stillCurrent = () =>
     readTaskboardAutomationReadiness(request.taskboardProjectId),
   ]);
   if (!stillCurrent()) return { quota, stale: true };
-  const shouldRun = request.enabledByUser
-    && (!request.quotaAware || quota?.state === "available")
-    && readiness.state === "runnable";
+  const shouldRun = shouldRunTaskboardAutomation(request, quota, readiness);
   const result = await reconcileTaskboardAutomation(
     { ...request, operation: shouldRun ? "ensure-active" : "pause" },
     rpc,

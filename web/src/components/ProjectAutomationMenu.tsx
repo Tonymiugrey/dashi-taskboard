@@ -83,13 +83,13 @@ export function ProjectAutomationMenu({
   const readiness = automation?.readiness;
   const stateLabel = !automation?.enabledByUser
     ? "已暂停 · 用户关闭"
-    : automation.quotaAware && quota?.state !== "available"
+    : automation.quotaAware && quota?.state === "blocked"
       ? "已暂停 · 额度不足"
       : readiness?.state === "standby"
         ? "待机 · 无待办"
         : "运行中";
   const visuallyRunning = automation?.enabledByUser
-    && (!automation.quotaAware || quota?.state === "available")
+    && (!automation.quotaAware || quota?.state !== "blocked")
     && readiness?.state !== "standby";
   const disabled = pending || Boolean(unavailableReason);
 
@@ -206,10 +206,10 @@ export function ProjectAutomationMenu({
           )}
           {quota?.state === "unavailable" && (
             quota.reason === "api-key"
-              ? "API Key 模式不支持读取 Codex App 额度"
-              : "当前账户无法读取额度"
+              ? "API Key 模式不支持读取 Codex App 额度，自动认领保持运行"
+              : "当前账户无法读取额度，自动认领保持运行"
           )}
-          {(!quota || quota.state === "unknown") && "额度状态未知，自动认领已暂停"}
+          {(!quota || quota.state === "unknown") && "额度状态未知，自动认领保持运行"}
         </div>
       )}
       {readiness?.state === "standby" && readiness.blockedTodoCount > 0 && (

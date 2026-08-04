@@ -63,6 +63,8 @@ test("the project navigation automation menu owns the icon, fields, and accessib
   assert.match(menuSource, /待机 · 无待办/);
   assert.match(menuSource, /已暂停 · 用户关闭/);
   assert.match(menuSource, /已暂停 · 额度不足/);
+  assert.match(menuSource, /quota\?\.state === "blocked"/);
+  assert.match(menuSource, /额度状态未知，自动认领保持运行/);
   assert.doesNotMatch(menuSource, /已开启自动认领|自动认领未开启/);
   assert.match(menuSource, /自动认领开关/);
   assert.match(menuSource, /5, 10, 15, 30, 60/);

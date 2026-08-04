@@ -7,6 +7,7 @@ import {
   buildTaskboardAutomationSpec,
   parseTaskboardAutomationHostRequest,
   reconcileTaskboardAutomation,
+  shouldRunTaskboardAutomation,
   summarizeTaskboardAutomationReadiness,
 } from "../shared/taskboard-automation.mjs";
 import {
@@ -225,6 +226,24 @@ test("automation readiness resumes when a todo has no unresolved blocker", () =>
     runnableTodoCount: 2,
     blockedTodoCount: 1,
   });
+});
+
+test("quota-aware automation pauses only for a confirmed exhausted quota", () => {
+  const runnable = { state: "runnable" };
+  const request = { enabledByUser: true, quotaAware: true };
+
+  assert.equal(shouldRunTaskboardAutomation(request, { state: "available" }, runnable), true);
+  assert.equal(shouldRunTaskboardAutomation(request, { state: "unknown" }, runnable), true);
+  assert.equal(shouldRunTaskboardAutomation(request, { state: "unavailable" }, runnable), true);
+  assert.equal(shouldRunTaskboardAutomation(request, { state: "blocked" }, runnable), false);
+  assert.equal(
+    shouldRunTaskboardAutomation({ ...request, enabledByUser: false }, { state: "available" }, runnable),
+    false,
+  );
+  assert.equal(
+    shouldRunTaskboardAutomation(request, { state: "available" }, { state: "standby" }),
+    false,
+  );
 });
 
 test("the generated cron spec uses the selected whitelisted local Codex options", () => {
