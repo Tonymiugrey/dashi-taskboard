@@ -48,6 +48,7 @@ import {
 import {
   createInlineMediaSegments,
   InlineMediaComposer,
+  inlineMediaAssignments,
   inlineMediaImages,
   inlineMediaText,
   resolveInlineMediaMarkdown,
@@ -61,7 +62,6 @@ import {
   IssueSubIssues,
   type RelationMutationResult,
 } from "./IssueRelations";
-import { resolveAssignmentBackspace } from "../../../shared/assignment-delete-confirmation.mjs";
 
 const PRIORITY_DETAILS: Record<TaskPriority, { label: string; bars: number }> = {
   none: { label: "无优先级", bars: 0 },
@@ -227,10 +227,6 @@ export function TaskDetail({
     ),
   );
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
-  const [pendingMentions, setPendingMentions] = useState<Array<{
-    target: CodexTarget;
-    instruction: string;
-  }>>([]);
   const [pendingMentionDeleteId, setPendingMentionDeleteId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -248,6 +244,7 @@ export function TaskDetail({
     || workflows.some((workflow) => workflow.id === currentTask.workflowId);
   const draft = serializeInlineMedia(commentSegments);
   const commentInlineImages = inlineMediaImages(commentSegments);
+  const pendingMentions = inlineMediaAssignments(commentSegments);
 
   useEffect(() => {
     setCurrentTask(task);
@@ -462,7 +459,6 @@ export function TaskDetail({
         : { ...comment, attachments: [...comment.attachments, ...uploaded] };
       setComments((current) => [...current, nextComment]);
       setCommentSegments(createInlineMediaSegments());
-      setPendingMentions([]);
       setPendingMentionDeleteId(null);
       setPendingCommentFiles([]);
       if (commentAttachmentInputRef.current) commentAttachmentInputRef.current.value = "";
@@ -503,58 +499,7 @@ export function TaskDetail({
     }
   }
 
-  function removePendingMention(targetId: string) {
-    setPendingMentions((current) => current.filter(
-      (candidate) => candidate.target.id !== targetId,
-    ));
-    setPendingMentionDeleteId(null);
-  }
-
-  function applyAssignmentBackspace(
-    event: KeyboardEvent<HTMLTextAreaElement>,
-    targetId: string | null | undefined,
-    adjacent: boolean,
-  ): boolean {
-    const action = resolveAssignmentBackspace({
-      key: event.key,
-      repeat: event.repeat,
-      targetId,
-      armedTargetId: pendingMentionDeleteId,
-      selectionStart: event.currentTarget.selectionStart,
-      selectionEnd: event.currentTarget.selectionEnd,
-      adjacent,
-    });
-    if (action === "pass") return false;
-    event.preventDefault();
-    if (action === "delete" && targetId) removePendingMention(targetId);
-    else if (targetId) setPendingMentionDeleteId(targetId);
-    return true;
-  }
-
   function handleCommentComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    const textareas = event.currentTarget.parentElement?.querySelectorAll(":scope > textarea");
-    const isLastTextSegment = Boolean(
-      textareas?.length && textareas.item(textareas.length - 1) === event.currentTarget,
-    );
-    const targetId = pendingMentions.at(-1)?.target.id;
-    const adjacent = Boolean(
-      isLastTextSegment
-      && event.currentTarget.dataset.mentionMenuOpen !== "true"
-      && event.currentTarget.selectionStart === event.currentTarget.value.length,
-    );
-    if (applyAssignmentBackspace(event, targetId, adjacent)) return;
-    if (pendingMentionDeleteId) setPendingMentionDeleteId(null);
-    handleSubmitShortcut(event);
-  }
-
-  function handleAssignmentKeyDown(
-    event: KeyboardEvent<HTMLTextAreaElement>,
-    targetId: string,
-  ) {
-    const adjacent = event.currentTarget.value.length === 0
-      && event.currentTarget.selectionStart === 0;
-    if (applyAssignmentBackspace(event, targetId, adjacent)) return;
-    if (pendingMentionDeleteId) setPendingMentionDeleteId(null);
     handleSubmitShortcut(event);
   }
 
@@ -1070,63 +1015,9 @@ export function TaskDetail({
                   onError={setCommentsError}
                   onKeyDown={handleCommentComposerKeyDown}
                   mentionOptions={codexTargets}
-                  onMention={(target) => {
-                    setPendingMentionDeleteId(null);
-                    setPendingMentions((current) => (
-                      current.some((candidate) => candidate.target.id === target.id)
-                        ? current
-                        : [...current, { target, instruction: "" }]
-                    ));
-                  }}
+                  armedAssignmentId={pendingMentionDeleteId}
+                  onArmedAssignmentChange={setPendingMentionDeleteId}
                 />
-                {pendingMentions.length > 0 && (
-                  <div className="codex-assignment-drafts" aria-label="待分配设备任务">
-                    {pendingMentions.map((assignment) => (
-                      <label
-                        key={assignment.target.id}
-                        data-assignment-id={assignment.target.id}
-                        className={pendingMentionDeleteId === assignment.target.id
-                          ? "is-delete-confirming"
-                          : undefined}
-                      >
-                        <span>
-                          <i className={`codex-target-presence ${assignment.target.online ? "is-online" : ""}`} />
-                          <strong>{assignment.target.name}</strong>
-                          <small>{pendingMentionDeleteId === assignment.target.id
-                            ? "再次退格删除"
-                            : assignment.target.online ? "在线" : "离线，稍后处理"}</small>
-                          <button
-                            type="button"
-                            aria-label={`移除 ${assignment.target.name} 的任务`}
-                            onClick={() => removePendingMention(assignment.target.id)}
-                          >
-                            <LinearIcon name="close" />
-                          </button>
-                        </span>
-                        <textarea
-                          rows={2}
-                          value={assignment.instruction}
-                          placeholder={`输入给 ${assignment.target.name} 的任务…`}
-                          aria-label={`输入给 ${assignment.target.name} 的任务`}
-                          onChange={(event) => {
-                            setPendingMentionDeleteId(null);
-                            setPendingMentions((current) => current.map(
-                              (candidate) => candidate.target.id === assignment.target.id
-                                ? { ...candidate, instruction: event.target.value }
-                                : candidate,
-                            ));
-                          }}
-                          onKeyDown={(event) => handleAssignmentKeyDown(event, assignment.target.id)}
-                          onBlur={(event) => {
-                            if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) {
-                              setPendingMentionDeleteId(null);
-                            }
-                          }}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                )}
                 <PendingAttachments
                   files={pendingCommentFiles}
                   disabled={submitting}

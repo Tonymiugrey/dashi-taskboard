@@ -44,20 +44,25 @@ test("ordinary editing and text selections pass through unchanged", () => {
   }), "pass");
 });
 
-test("the comment composer wires both boundaries to a neutral confirmation state", async () => {
+test("the comment composer inserts assignments inline and wires both neutral delete boundaries", async () => {
   const [detail, composer, styles] = await Promise.all([
     readFile(new URL("../web/src/components/TaskDetail.tsx", import.meta.url), "utf8"),
     readFile(new URL("../web/src/components/InlineMediaComposer.tsx", import.meta.url), "utf8"),
     readFile(new URL("../web/src/styles.css", import.meta.url), "utf8"),
   ]);
-  assert.match(detail, /event\.currentTarget\.value\.length === 0/);
-  assert.match(detail, /event\.currentTarget\.selectionStart === event\.currentTarget\.value\.length/);
-  assert.match(detail, /pendingMentions\.at\(-1\)\?\.target\.id/);
-  assert.match(detail, /再次退格删除/);
-  assert.match(detail, /is-delete-confirming/);
+  assert.match(detail, /inlineMediaAssignments\(commentSegments\)/);
+  assert.doesNotMatch(detail, /codex-assignment-drafts/);
+  assert.match(composer, /type: "codex-assignment"/);
+  assert.match(composer, /candidate\.id === segment\.id \? \[before, assignment, after\]/);
+  assert.match(composer, /previous\?\.type === "codex-assignment"/);
+  assert.match(composer, /event\.currentTarget\.selectionStart === 0/);
+  assert.match(composer, /assignment\.instruction\.length === 0/);
+  assert.match(composer, /onSelect=\{\(\) => \{/);
+  assert.match(composer, /再次退格删除/);
+  assert.match(composer, /inline-codex-assignment/);
   assert.match(composer, /data-mention-menu-open/);
   const confirmationStyles = styles.match(
-    /\.codex-assignment-drafts > label\.is-delete-confirming \{[^}]+\}/,
+    /\.inline-codex-assignment\.is-delete-confirming \{[^}]+\}/,
   )?.[0] ?? "";
   assert.match(confirmationStyles, /var\(--border-strong\)/);
   assert.match(confirmationStyles, /var\(--surface-hover\)/);

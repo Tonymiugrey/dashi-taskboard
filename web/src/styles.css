@@ -3951,13 +3951,6 @@ kbd {
   box-shadow: 0 0 0 2px rgb(53 184 107 / 14%);
 }
 
-.codex-assignment-drafts {
-  display: grid;
-  gap: 8px;
-  padding: 0 16px 14px;
-}
-
-.codex-assignment-drafts > label,
 .codex-assignment {
   display: grid;
   gap: 7px;
@@ -3967,21 +3960,108 @@ kbd {
   background: var(--surface-muted);
 }
 
-.codex-assignment-drafts > label {
+.inline-media-composer.has-inline-assignments {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: center;
+  gap: 4px;
+}
+
+.inline-media-composer.has-inline-assignments > textarea {
+  field-sizing: content;
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 1ch;
+  max-width: 100%;
+  padding: 3px 0;
+}
+
+.inline-media-composer.has-inline-assignments > textarea:last-of-type {
+  flex: 1 1 120px;
+}
+
+.inline-media-composer.has-inline-assignments > .inline-media-image {
+  flex: 0 0 100%;
+}
+
+.inline-codex-assignment {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 28px;
+  overflow: hidden;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-muted);
   transition: border-color 100ms ease, background 100ms ease, box-shadow 100ms ease;
 }
 
-.codex-assignment-drafts > label.is-delete-confirming {
+.inline-codex-assignment.is-delete-confirming {
   border-color: var(--border-strong);
   background: var(--surface-hover);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-tertiary) 18%, transparent);
 }
 
-.codex-assignment-drafts > label.is-delete-confirming > span small {
-  color: var(--text-secondary);
+.inline-codex-assignment-target {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 5px;
+  padding-left: 8px;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 580;
+  white-space: nowrap;
 }
 
-.codex-assignment-drafts > label > span,
+.inline-codex-assignment-divider {
+  padding: 0 6px;
+  color: var(--text-tertiary);
+}
+
+.inline-codex-assignment input {
+  field-sizing: content;
+  flex: 1 1 120px;
+  width: 150px;
+  min-width: 88px;
+  max-width: 320px;
+  padding: 4px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.inline-codex-assignment input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.inline-codex-assignment button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.inline-codex-assignment button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.inline-codex-assignment button svg {
+  width: 12px;
+  height: 12px;
+}
+
 .codex-assignment > header,
 .codex-assignment > header > span {
   display: flex;
@@ -3989,7 +4069,6 @@ kbd {
   gap: 7px;
 }
 
-.codex-assignment-drafts > label > span small,
 .codex-assignment > header small {
   margin-left: auto;
   color: var(--text-tertiary);
@@ -3997,53 +4076,10 @@ kbd {
   font-weight: 450;
 }
 
-.codex-assignment-drafts strong,
 .codex-assignment > header span {
   color: var(--text-primary);
   font-size: 11px;
   font-weight: 580;
-}
-
-.codex-assignment-drafts button {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  margin-left: 2px;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-}
-
-.codex-assignment-drafts button:hover {
-  background: var(--surface-hover);
-  color: var(--text-primary);
-}
-
-.codex-assignment-drafts button svg {
-  width: 13px;
-  height: 13px;
-}
-
-.codex-assignment-drafts textarea {
-  min-height: 48px;
-  padding: 7px 8px;
-  resize: vertical;
-  border: var(--border-hairline) solid var(--border-strong);
-  border-radius: 5px;
-  outline: 0;
-  background: var(--surface);
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.codex-assignment-drafts textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .codex-assignment-list {

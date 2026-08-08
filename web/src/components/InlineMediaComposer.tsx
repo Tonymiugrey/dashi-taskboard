@@ -11,6 +11,7 @@ import {
 import type { Attachment } from "../types";
 import type { CodexTarget } from "../types";
 import { attachmentContentUrl } from "../api";
+import { resolveAssignmentBackspace } from "../../../shared/assignment-delete-confirmation.mjs";
 import { clipboardImages, fileKey, MAX_ATTACHMENT_SIZE } from "./PendingAttachments";
 import { LinearIcon } from "./LinearIcon";
 
@@ -27,7 +28,14 @@ interface InlineImageSegment {
   file: File;
 }
 
-export type InlineMediaSegment = InlineTextSegment | InlineImageSegment;
+export interface InlineAssignmentSegment {
+  id: string;
+  type: "codex-assignment";
+  target: CodexTarget;
+  instruction: string;
+}
+
+export type InlineMediaSegment = InlineTextSegment | InlineImageSegment | InlineAssignmentSegment;
 export type PendingInlineImage = InlineImageSegment;
 
 export interface InlineMediaComposerHandle {
@@ -45,7 +53,8 @@ interface InlineMediaComposerProps {
   onError: (message: string | null) => void;
   onKeyDown?: KeyboardEventHandler<HTMLTextAreaElement>;
   mentionOptions?: CodexTarget[];
-  onMention?: (target: CodexTarget) => void;
+  armedAssignmentId?: string | null;
+  onArmedAssignmentChange?: (targetId: string | null) => void;
 }
 
 let segmentSequence = 0;
@@ -69,6 +78,15 @@ function imageSegment(file: File): InlineImageSegment {
   };
 }
 
+function assignmentSegment(target: CodexTarget): InlineAssignmentSegment {
+  return {
+    id: segmentId("assignment"),
+    type: "codex-assignment",
+    target,
+    instruction: "",
+  };
+}
+
 export function createInlineMediaSegments(text = ""): InlineMediaSegment[] {
   return [textSegment(text)];
 }
@@ -77,13 +95,21 @@ export function inlineMediaImages(segments: InlineMediaSegment[]): PendingInline
   return segments.filter((segment): segment is PendingInlineImage => segment.type === "pending-image");
 }
 
+export function inlineMediaAssignments(segments: InlineMediaSegment[]): InlineAssignmentSegment[] {
+  return segments.filter((segment): segment is InlineAssignmentSegment => (
+    segment.type === "codex-assignment"
+  ));
+}
+
 export function inlineMediaText(segments: InlineMediaSegment[]): string {
   return segments.flatMap((segment) => segment.type === "text" ? [segment.text] : []).join("");
 }
 
 export function serializeInlineMedia(segments: InlineMediaSegment[]): string {
   return segments.map((segment) => (
-    segment.type === "text" ? segment.text : `\n\n${segment.token}\n\n`
+    segment.type === "text"
+      ? segment.text
+      : segment.type === "pending-image" ? `\n\n${segment.token}\n\n` : ""
   )).join("");
 }
 
@@ -171,10 +197,13 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     onError,
     onKeyDown,
     mentionOptions = [],
-    onMention,
+    armedAssignmentId = null,
+    onArmedAssignmentChange,
   }, ref) {
     const textareas = useRef(new Map<string, HTMLTextAreaElement>());
+    const assignmentInputs = useRef(new Map<string, HTMLInputElement>());
     const pendingFocus = useRef<{ id: string; offset: number } | null>(null);
+    const pendingAssignmentFocus = useRef<string | null>(null);
     const [mentionMenu, setMentionMenu] = useState<{
       segmentId: string;
       start: number;
@@ -186,12 +215,18 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     useLayoutEffect(() => {
       for (const element of textareas.current.values()) resizeTextarea(element);
       const focus = pendingFocus.current;
-      if (!focus) return;
-      const target = textareas.current.get(focus.id);
-      if (!target) return;
-      target.focus();
-      target.setSelectionRange(focus.offset, focus.offset);
-      pendingFocus.current = null;
+      if (focus) {
+        const target = textareas.current.get(focus.id);
+        if (target) {
+          target.focus();
+          target.setSelectionRange(focus.offset, focus.offset);
+          pendingFocus.current = null;
+        }
+      }
+      const assignmentFocus = pendingAssignmentFocus.current;
+      if (!assignmentFocus) return;
+      assignmentInputs.current.get(assignmentFocus)?.focus();
+      pendingAssignmentFocus.current = null;
     }, [segments]);
 
     useImperativeHandle(ref, () => ({
@@ -234,6 +269,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     }
 
     function changeText(id: string, text: string, cursor: number) {
+      onArmedAssignmentChange?.(null);
       onChange(segments.map((segment) => (
         segment.id === id && segment.type === "text" ? { ...segment, text } : segment
       )));
@@ -252,9 +288,13 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       });
     }
 
+    const assignedTargetIds = new Set(inlineMediaAssignments(segments).map(
+      (assignment) => assignment.target.id,
+    ));
     const filteredMentions = mentionMenu
-      ? mentionOptions.filter((target) => target.name.toLocaleLowerCase().includes(
-          mentionMenu.query.toLocaleLowerCase(),
+      ? mentionOptions.filter((target) => (
+          !assignedTargetIds.has(target.id)
+          && target.name.toLocaleLowerCase().includes(mentionMenu.query.toLocaleLowerCase())
         ))
       : [];
 
@@ -264,15 +304,58 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         candidate.id === mentionMenu.segmentId && candidate.type === "text"
       ));
       if (!segment || segment.type !== "text") return;
-      const text = `${segment.text.slice(0, mentionMenu.start)}${segment.text.slice(mentionMenu.end)}`;
-      const cursor = mentionMenu.start;
-      pendingFocus.current = { id: segment.id, offset: cursor };
-      onChange(segments.map((candidate) => candidate.id === segment.id ? { ...segment, text } : candidate));
-      onMention?.(target);
+      const before = { ...segment, text: segment.text.slice(0, mentionMenu.start) };
+      const assignment = assignmentSegment(target);
+      const after = textSegment(segment.text.slice(mentionMenu.end));
+      pendingAssignmentFocus.current = assignment.id;
+      onChange(segments.flatMap((candidate) => (
+        candidate.id === segment.id ? [before, assignment, after] : [candidate]
+      )));
+      onArmedAssignmentChange?.(null);
       setMentionMenu(null);
     }
 
-    function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    function removeAssignment(id: string) {
+      const index = segments.findIndex((segment) => segment.id === id);
+      const before = segments[index - 1];
+      const after = segments[index + 1];
+      if (before?.type === "text" && after?.type === "text") {
+        const offset = before.text.length;
+        pendingFocus.current = { id: before.id, offset };
+        onChange(segments.filter((_, segmentIndex) => (
+          segmentIndex !== index && segmentIndex !== index + 1
+        )).map((segment) => segment.id === before.id
+          ? { ...before, text: before.text + after.text }
+          : segment));
+      } else {
+        onChange(normalizeSegments(segments.filter((segment) => segment.id !== id)));
+      }
+      onArmedAssignmentChange?.(null);
+    }
+
+    function applyAssignmentBackspace(
+      event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>,
+      targetId: string | null | undefined,
+      assignmentId: string | null | undefined,
+      adjacent: boolean,
+    ): boolean {
+      const action = resolveAssignmentBackspace({
+        key: event.key,
+        repeat: event.repeat,
+        targetId,
+        armedTargetId: armedAssignmentId,
+        selectionStart: event.currentTarget.selectionStart,
+        selectionEnd: event.currentTarget.selectionEnd,
+        adjacent,
+      });
+      if (action === "pass") return false;
+      event.preventDefault();
+      if (action === "delete" && assignmentId) removeAssignment(assignmentId);
+      else if (targetId) onArmedAssignmentChange?.(targetId);
+      return true;
+    }
+
+    function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, segmentIndex: number) {
       if (mentionMenu && filteredMentions.length > 0) {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
@@ -296,7 +379,34 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
           return;
         }
       }
+      const previous = segments[segmentIndex - 1];
+      if (
+        previous?.type === "codex-assignment"
+        && applyAssignmentBackspace(
+          event,
+          previous.target.id,
+          previous.id,
+          event.currentTarget.selectionStart === 0,
+        )
+      ) return;
+      if (armedAssignmentId) onArmedAssignmentChange?.(null);
       onKeyDown?.(event);
+    }
+
+    function handleAssignmentKeyDown(
+      event: KeyboardEvent<HTMLInputElement>,
+      assignment: InlineAssignmentSegment,
+    ) {
+      if (applyAssignmentBackspace(
+        event,
+        assignment.target.id,
+        assignment.id,
+        assignment.instruction.length === 0 && event.currentTarget.selectionStart === 0,
+      )) return;
+      if (armedAssignmentId) onArmedAssignmentChange?.(null);
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        onKeyDown?.(event as unknown as KeyboardEvent<HTMLTextAreaElement>);
+      }
     }
 
     function pasteImages(
@@ -306,6 +416,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       const clipboardFiles = clipboardImages(event.clipboardData);
       if (clipboardFiles.length === 0) return;
       event.preventDefault();
+      onArmedAssignmentChange?.(null);
 
       const oversized = clipboardFiles.find((file) => file.size > MAX_ATTACHMENT_SIZE);
       if (oversized) {
@@ -337,15 +448,20 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     }
 
     function removeImage(id: string) {
+      onArmedAssignmentChange?.(null);
       onChange(normalizeSegments(segments.filter((segment) => segment.id !== id)));
     }
 
     const isEmpty = segments.every((segment) => (
       segment.type === "text" ? segment.text.length === 0 : false
     ));
+    const hasAssignments = segments.some((segment) => segment.type === "codex-assignment");
 
     return (
-      <div className={`inline-media-composer ${className}`.trim()} aria-label={ariaLabel}>
+      <div
+        className={`inline-media-composer${hasAssignments ? " has-inline-assignments" : ""} ${className}`.trim()}
+        aria-label={ariaLabel}
+      >
         {segments.map((segment, index) => (
           segment.type === "text" ? (
             <textarea
@@ -365,20 +481,68 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
                 resizeTextarea(event.currentTarget);
               }}
               onPaste={(event) => pasteImages(event, segment)}
-              onKeyDown={handleKeyDown}
+              onKeyDown={(event) => handleKeyDown(event, index)}
+              onSelect={() => {
+                if (armedAssignmentId) onArmedAssignmentChange?.(null);
+              }}
               onBlur={(event) => {
                 if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) {
                   setMentionMenu(null);
                 }
               }}
             />
-          ) : (
+          ) : segment.type === "pending-image" ? (
             <PendingImageBlock
               key={segment.id}
               segment={segment}
               disabled={disabled}
               onRemove={() => removeImage(segment.id)}
             />
+          ) : (
+            <label
+              key={segment.id}
+              data-assignment-id={segment.target.id}
+              className={`inline-codex-assignment${
+                armedAssignmentId === segment.target.id ? " is-delete-confirming" : ""
+              }`}
+            >
+              <span className="inline-codex-assignment-target">
+                <i className={`codex-target-presence ${segment.target.online ? "is-online" : ""}`} />
+                @{segment.target.name}
+              </span>
+              <span className="inline-codex-assignment-divider" aria-hidden="true">|</span>
+              <input
+                ref={(element) => {
+                  if (element) assignmentInputs.current.set(segment.id, element);
+                  else assignmentInputs.current.delete(segment.id);
+                }}
+                type="text"
+                disabled={disabled}
+                value={segment.instruction}
+                placeholder={armedAssignmentId === segment.target.id
+                  ? "再次退格删除"
+                  : "输入设备任务…"}
+                aria-label={`输入给 ${segment.target.name} 的任务`}
+                onChange={(event) => {
+                  onArmedAssignmentChange?.(null);
+                  onChange(segments.map((candidate) => candidate.id === segment.id
+                    ? { ...segment, instruction: event.target.value }
+                    : candidate));
+                }}
+                onKeyDown={(event) => handleAssignmentKeyDown(event, segment)}
+                onSelect={() => {
+                  if (armedAssignmentId) onArmedAssignmentChange?.(null);
+                }}
+              />
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={`移除 ${segment.target.name} 的任务`}
+                onClick={() => removeAssignment(segment.id)}
+              >
+                <LinearIcon name="close" />
+              </button>
+            </label>
           )
         ))}
         {mentionMenu && filteredMentions.length > 0 && (
