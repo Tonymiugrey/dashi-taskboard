@@ -75,10 +75,8 @@ test("health and the default local project are available", async () => {
 
   const metadata = await request(baseUrl, "/api/meta");
   assert.equal(metadata.response.status, 200);
-  assert.deepEqual(metadata.body, {
-    manageTaskboardSkillPath: skillPath,
-    capabilities: { localAiChat: true },
-  });
+  assert.equal(metadata.body.manageTaskboardSkillPath, skillPath);
+  assert.deepEqual(metadata.body.capabilities, { localAiChat: true });
 
   const result = await request(baseUrl, "/api/projects");
   assert.equal(result.response.status, 200);
@@ -87,6 +85,20 @@ test("health and the default local project are available", async () => {
   assert.equal(result.body.projects[0].name, "Local");
   assert.equal(result.body.projects[0].workspacePath, null);
   assert.equal(result.body.projects[0].issueCount, 0);
+});
+
+test("bridge-only mode keeps local APIs but never serves frontend assets", async () => {
+  const baseUrl = await startServer(async () => ({ bridgeOnly: true }));
+
+  const health = await request(baseUrl, "/health");
+  assert.equal(health.response.status, 200);
+
+  const metadata = await request(baseUrl, "/api/meta");
+  assert.equal(metadata.response.status, 200);
+
+  const frontend = await request(baseUrl, "/");
+  assert.equal(frontend.response.status, 404);
+  assert.equal(frontend.body.error.code, "BRIDGE_ONLY");
 });
 
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {
@@ -735,8 +747,8 @@ done
   assert.equal(result.response.status, 200);
   assert.deepEqual(result.body, {
     skills: [
-      { id: "repo-skill", label: "Repository Skill", scope: "repo" },
-      { id: "user-skill", label: "user-skill", scope: "user" },
+      { id: "repo-skill", label: "Repository Skill", description: "", path: "", scope: "repo" },
+      { id: "user-skill", label: "user-skill", description: "", path: "", scope: "user" },
     ],
     mcpServers: [
       { id: "context7", label: "context7", transport: "streamable_http" },

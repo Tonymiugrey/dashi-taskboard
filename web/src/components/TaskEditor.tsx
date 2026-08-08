@@ -97,7 +97,7 @@ function contextValue(context: DevelopmentContext | null): string {
 
 function contextLabel(context: DevelopmentContext): string {
   if (context.type === "branch") return context.branch;
-  const folder = context.path.split(/[\\/]/).filter(Boolean).at(-1) ?? context.path;
+  const folder = context.path?.split(/[\\/]/).filter(Boolean).at(-1) ?? "未映射";
   return `${context.branch ?? "detached"} · ${folder}`;
 }
 

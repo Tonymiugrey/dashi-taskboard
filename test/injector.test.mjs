@@ -97,7 +97,14 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
   assert.match(source, /await restartResidentInjectorForRefresh\(port\)/);
 });
 
-test("the injected iframe follows the configured local service port", () => {
-  assert.match(source, /const taskboardPageUrl = `\$\{taskboardOrigin\}\/\?host=codex`/);
-  assert.match(source, /window\.__CODEX_TASKBOARD_URL__ = \$\{JSON\.stringify\(taskboardPageUrl\)\}/);
+test("the injected iframe loads the cloud origin while the local process stays bridge-only", () => {
+  assert.match(source, /async function resolveEmbeddedTaskboardContext/);
+  assert.match(source, /session\?\.mode === "cloud"/);
+  assert.match(source, /\/api\/local\/cloud-browser-session/);
+  assert.match(source, /Network\.setCookie/);
+  assert.match(source, /__Host-codex-taskboard-session/);
+  assert.match(source, /window\.__CODEX_TASKBOARD_MANAGED_URL__/);
+  assert.match(source, /window\.__CODEX_TASKBOARD_MANAGED_ORIGIN__/);
+  assert.match(source, /CODEX_TASKBOARD_BRIDGE_ONLY: bridgeOnly \? "1" : "0"/);
+  assert.match(source, /getLocalCapability: async \(pathname\)/);
 });

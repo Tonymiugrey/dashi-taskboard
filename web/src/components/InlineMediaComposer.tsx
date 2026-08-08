@@ -264,9 +264,8 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         candidate.id === mentionMenu.segmentId && candidate.type === "text"
       ));
       if (!segment || segment.type !== "text") return;
-      const replacement = `@${target.name} `;
-      const text = `${segment.text.slice(0, mentionMenu.start)}${replacement}${segment.text.slice(mentionMenu.end)}`;
-      const cursor = mentionMenu.start + replacement.length;
+      const text = `${segment.text.slice(0, mentionMenu.start)}${segment.text.slice(mentionMenu.end)}`;
+      const cursor = mentionMenu.start;
       pendingFocus.current = { id: segment.id, offset: cursor };
       onChange(segments.map((candidate) => candidate.id === segment.id ? { ...segment, text } : candidate));
       onMention?.(target);
@@ -383,7 +382,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         ))}
         {mentionMenu && filteredMentions.length > 0 && (
           <div className="codex-mention-menu" role="listbox" aria-label="选择 Codex 目标">
-            <div className="codex-mention-menu-title">发送给 Codex</div>
+            <div className="codex-mention-menu-title">分配设备任务</div>
             {filteredMentions.map((target, index) => (
               <button
                 type="button"

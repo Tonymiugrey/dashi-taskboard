@@ -3951,6 +3951,129 @@ kbd {
   box-shadow: 0 0 0 2px rgb(53 184 107 / 14%);
 }
 
+.codex-assignment-drafts {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+
+.codex-assignment-drafts > label,
+.codex-assignment {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-muted);
+}
+
+.codex-assignment-drafts > label > span,
+.codex-assignment > header,
+.codex-assignment > header > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.codex-assignment-drafts > label > span small,
+.codex-assignment > header small {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 450;
+}
+
+.codex-assignment-drafts strong,
+.codex-assignment > header span {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 580;
+}
+
+.codex-assignment-drafts button {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.codex-assignment-drafts button:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.codex-assignment-drafts button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.codex-assignment-drafts textarea {
+  min-height: 48px;
+  padding: 7px 8px;
+  resize: vertical;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 5px;
+  outline: 0;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.codex-assignment-drafts textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.codex-assignment-list {
+  display: grid;
+  gap: 7px;
+  padding: 0 16px 12px;
+}
+
+.codex-assignment > header {
+  justify-content: space-between;
+}
+
+.codex-assignment > header i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.codex-assignment.is-claimed > header i {
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.codex-assignment.is-completed > header i {
+  background: #35b86b;
+}
+
+.codex-assignment.is-failed > header i {
+  background: var(--danger);
+}
+
+.codex-assignment > p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 17px;
+  white-space: pre-wrap;
+}
+
+.codex-assignment .issue-conversation-link {
+  width: fit-content;
+}
+
 .codex-mention-statuses {
   display: flex;
   flex-wrap: wrap;

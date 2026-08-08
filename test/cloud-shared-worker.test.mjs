@@ -75,6 +75,48 @@ test("Basic authentication requires an exact shared-secret match", async () => {
   assert.match(rejected.response.headers.get("www-authenticate") ?? "", /^Basic\b/i);
 });
 
+test("a short-lived HttpOnly session authenticates the cloud iframe without exposing Basic credentials", async () => {
+  const issued = await cloud.request("/api/auth/session", {
+    method: "POST",
+    actorName: alice,
+  });
+  assert.equal(issued.response.status, 200);
+  assert.equal(issued.body.cookieName, "__Host-codex-taskboard-session");
+  assert.match(issued.body.sessionToken, /^[a-z0-9_-]+\.[a-z0-9_-]+$/i);
+  assert.match(issued.response.headers.get("set-cookie") ?? "", /HttpOnly/);
+  assert.match(issued.response.headers.get("set-cookie") ?? "", /SameSite=None/);
+
+  const authenticated = await cloud.request("/api/projects", {
+    headers: {
+      cookie: `${issued.body.cookieName}=${issued.body.sessionToken}`,
+    },
+  });
+  assert.equal(authenticated.response.status, 200);
+
+  const crossSite = await cloud.request("/api/projects", {
+    headers: {
+      cookie: `${issued.body.cookieName}=${issued.body.sessionToken}`,
+      origin: "https://attacker.example",
+    },
+  });
+  assert.equal(crossSite.response.status, 401);
+
+  const cannotExposeTokenAgain = await cloud.request("/api/auth/session", {
+    method: "POST",
+    headers: {
+      cookie: `${issued.body.cookieName}=${issued.body.sessionToken}`,
+    },
+  });
+  assert.equal(cannotExposeTokenAgain.response.status, 401);
+
+  const tampered = await cloud.request("/api/projects", {
+    headers: {
+      cookie: `${issued.body.cookieName}=${issued.body.sessionToken.slice(0, -1)}x`,
+    },
+  });
+  assert.equal(tampered.response.status, 401);
+});
+
 test("the Basic username becomes the trusted actor while the shared password grants access", async () => {
   const project = await createProject("alpha");
   assert.equal(project.response.status, 201);
@@ -153,7 +195,7 @@ test("projects, tasks, comments, relations, and workflows preserve the current A
   assert.ok(listed.body.tasks.some((task) => task.id === child.body.task.id));
 });
 
-test("structured Codex mentions target one online device and create one claimable trigger", async () => {
+test("one comment assigns separate instructions and checkpoints to multiple Codex devices", async () => {
   await createProject("mentions");
   const target = {
     id: "device-macbook-pro",
@@ -168,34 +210,59 @@ test("structured Codex mentions target one online device and create one claimabl
   assert.equal(heartbeat.response.status, 200);
   assert.equal(heartbeat.body.target.id, target.id);
   assert.equal(heartbeat.body.target.online, true);
+  const secondTarget = {
+    id: "device-mac-mini",
+    name: "Codex · Mac mini",
+    projectIds: ["mentions"],
+  };
+  await cloud.request("/api/codex-targets/heartbeat", {
+    method: "POST",
+    actorName: alice,
+    json: secondTarget,
+  });
 
   const listed = await cloud.request("/api/codex-targets?projectId=mentions", {
     actorName: bob,
   });
   assert.equal(listed.response.status, 200);
-  assert.deepEqual(listed.body.targets.map(({ id, name, online }) => ({ id, name, online })), [{
-    id: target.id,
-    name: target.name,
-    online: true,
-  }]);
+  assert.deepEqual(listed.body.targets.map(({ id, name, online }) => ({ id, name, online })), [
+    { id: secondTarget.id, name: secondTarget.name, online: true },
+    { id: target.id, name: target.name, online: true },
+  ]);
 
   const task = await createTask("mentions", "Apply review feedback");
   const comment = await cloud.request(`/api/tasks/${task.body.task.id}/comments`, {
     method: "POST",
     actorName: bob,
     json: {
-      body: "@Codex · MacBook Pro 请按最新意见返工",
-      mentions: [{ targetId: target.id }],
+      body: "请并行处理这轮返工。",
+      mentions: [
+        { targetId: target.id, instruction: "修改 Worker API。" },
+        { targetId: secondTarget.id, instruction: "检查 UI 交互。" },
+      ],
     },
   });
   assert.equal(comment.response.status, 201);
-  assert.deepEqual(comment.body.comment.mentions, [{
-    targetId: target.id,
-    targetName: target.name,
-    status: "pending",
-    threadId: null,
-    error: null,
-  }]);
+  assert.deepEqual(comment.body.comment.mentions, [
+    {
+      targetId: target.id,
+      targetName: target.name,
+      instruction: "修改 Worker API。",
+      order: 0,
+      status: "pending",
+      threadId: null,
+      error: null,
+    },
+    {
+      targetId: secondTarget.id,
+      targetName: secondTarget.name,
+      instruction: "检查 UI 交互。",
+      order: 1,
+      status: "pending",
+      threadId: null,
+      error: null,
+    },
+  ]);
 
   const claimed = await cloud.request(`/api/codex-targets/${target.id}/triggers/claim`, {
     method: "POST",
@@ -205,6 +272,8 @@ test("structured Codex mentions target one online device and create one claimabl
   assert.equal(claimed.body.trigger.comment.id, comment.body.comment.id);
   assert.equal(claimed.body.trigger.task.id, task.body.task.id);
   assert.equal(claimed.body.trigger.project.id, "mentions");
+  assert.equal(claimed.body.trigger.assignment.instruction, "修改 Worker API。");
+  assert.deepEqual(claimed.body.trigger.comment.mentions.map((mention) => mention.targetId), [target.id]);
 
   const noDuplicate = await cloud.request(`/api/codex-targets/${target.id}/triggers/claim`, {
     method: "POST",
@@ -212,6 +281,12 @@ test("structured Codex mentions target one online device and create one claimabl
   });
   assert.equal(noDuplicate.response.status, 200);
   assert.equal(noDuplicate.body.trigger, null);
+
+  const waitsForIssueLease = await cloud.request(
+    `/api/codex-targets/${secondTarget.id}/triggers/claim`,
+    { method: "POST", actorName: alice },
+  );
+  assert.equal(waitsForIssueLease.body.trigger, null);
 
   const completed = await cloud.request(
     `/api/codex-triggers/${comment.body.comment.id}/${target.id}`,
@@ -222,12 +297,28 @@ test("structured Codex mentions target one online device and create one claimabl
         claimToken: claimed.body.trigger.claimToken,
         status: "completed",
         threadId: "codex-thread-1",
+        checkpoint: {
+          summary: "Worker API 已修改并验证。",
+          changedFiles: ["cloud/src/index.mjs"],
+          baseCommit: "abc123",
+          resultCommit: "def456",
+          branch: "codex/api",
+        },
       },
     },
   );
   assert.equal(completed.response.status, 200);
   assert.equal(completed.body.comment.mentions[0].status, "completed");
   assert.equal(completed.body.comment.mentions[0].threadId, "codex-thread-1");
+
+  const secondClaim = await cloud.request(
+    `/api/codex-targets/${secondTarget.id}/triggers/claim`,
+    { method: "POST", actorName: alice },
+  );
+  assert.equal(secondClaim.response.status, 200);
+  assert.equal(secondClaim.body.trigger.assignment.instruction, "检查 UI 交互。");
+  assert.equal(secondClaim.body.trigger.context.checkpoints[0].summary, "Worker API 已修改并验证。");
+  assert.equal(secondClaim.body.trigger.context.checkpoints[0].resultCommit, "def456");
 });
 
 test("concurrent issue creation has unique identifiers and stale writes return 409", async () => {

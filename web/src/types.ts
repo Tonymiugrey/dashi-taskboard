@@ -24,7 +24,7 @@ export interface ActorIdentity {
 
 export type DevelopmentContext =
   | { type: "branch"; branch: string }
-  | { type: "worktree"; path: string; branch: string | null };
+  | { type: "worktree"; path: string | null; branch: string | null };
 
 export type Recurrence = {
   interval: number;
@@ -250,6 +250,8 @@ export interface CodexTarget {
 export interface CodexMention {
   targetId: string;
   targetName: string;
+  instruction: string;
+  order: number;
   status: "pending" | "claimed" | "completed" | "failed" | null;
   threadId: string | null;
   error: string | null;
@@ -274,6 +276,11 @@ export interface HostContext {
   projects?: Array<{ id: string; name: string }>;
   titlebarLeftInset?: number;
   sidebarCollapsed?: boolean;
+  bridge?: {
+    protocolVersion: 1;
+    sessionNonce: string;
+    capabilities: Array<"automation" | "local-capabilities" | "native-navigation">;
+  };
 }
 
 export interface TaskDraft {

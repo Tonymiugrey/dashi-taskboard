@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.6.8";
+  const VERSION = "0.7.0";
   const SOURCE_HASH = window.__CODEX_TASKBOARD_SOURCE_HASH__;
   const SENTINEL_KEY = "__codexTaskboardInjection__";
   const DEFAULT_TASKBOARD_URL = "http://127.0.0.1:47823/?host=codex";
@@ -25,6 +25,8 @@
   const HOST_HEARTBEAT_MAX_AGE_MS = 8_000;
   const MACOS_TITLEBAR_SAFE_LEFT = 80;
   const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh";
+  const BRIDGE_PROTOCOL_VERSION = 1;
+  const bridgeSessionNonce = window.crypto.randomUUID();
   const PLUGIN_LABELS = ["插件", "plugins"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
@@ -98,11 +100,9 @@
     }
   }
 
-  function isLocalTaskboardOrigin(origin) {
+  function isManagedTaskboardOrigin(origin) {
     try {
-      const { protocol, hostname } = new URL(origin);
-      return (protocol === "http:" || protocol === "https:")
-        && (hostname === "127.0.0.1" || hostname === "localhost");
+      return new URL(origin).origin === managedTaskboardOrigin();
     } catch (_) {
       return false;
     }
@@ -542,6 +542,11 @@
       user: readCodexUser() ?? undefined,
       titlebarLeftInset: titlebarLeftInset(),
       sidebarCollapsed: nativeSidebarCollapsed(),
+      bridge: {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        sessionNonce: bridgeSessionNonce,
+        capabilities: ["automation", "local-capabilities", "native-navigation"],
+      },
     };
     if (workspacePath) payload.workspacePath = workspacePath;
     if (projectId) payload.projectId = projectId;
@@ -748,10 +753,13 @@
   async function handleAutomationRequest(payload) {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : "";
     if (!requestId) return;
-    if (!isLocalTaskboardOrigin(frameOrigin)) {
+    if (
+      !isManagedTaskboardOrigin(frameOrigin)
+      || payload?.bridgeSessionNonce !== bridgeSessionNonce
+    ) {
       postToFrame({
         type: "taskboard:automation-response",
-        payload: { requestId, ok: false, error: "仅本地任务面板可用" },
+        payload: { requestId, ok: false, error: "Codex 本机桥会话无效" },
       });
       return;
     }
@@ -786,6 +794,48 @@
     }
   }
 
+  async function handleLocalCapabilityRequest(payload) {
+    const requestId = typeof payload?.requestId === "string" ? payload.requestId : "";
+    if (!requestId) return;
+    if (
+      !isManagedTaskboardOrigin(frameOrigin)
+      || payload?.sessionNonce !== bridgeSessionNonce
+    ) {
+      postToFrame({
+        type: "taskboard:local-capability-response",
+        payload: {
+          requestId,
+          sessionNonce: bridgeSessionNonce,
+          ok: false,
+          error: "Codex 本机桥会话无效",
+        },
+      });
+      return;
+    }
+    try {
+      const response = await requestHost("local-capability", { path: payload.path });
+      postToFrame({
+        type: "taskboard:local-capability-response",
+        payload: {
+          requestId,
+          sessionNonce: bridgeSessionNonce,
+          ok: true,
+          data: response.data,
+        },
+      });
+    } catch (error) {
+      postToFrame({
+        type: "taskboard:local-capability-response",
+        payload: {
+          requestId,
+          sessionNonce: bridgeSessionNonce,
+          ok: false,
+          error: error instanceof Error ? error.message : "Codex 本机能力读取失败",
+        },
+      });
+    }
+  }
+
   function onFrameMessage(event) {
     if (!frame || event.source !== frame.contentWindow || event.origin !== frameOrigin) return;
     const message = event.data;
@@ -815,6 +865,10 @@
     }
     if (message.type === "taskboard:automation-request") {
       void handleAutomationRequest(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:local-capability-request") {
+      void handleLocalCapabilityRequest(message.payload);
       return;
     }
     if (message.type === "taskboard:create-thread") void createThreadForTask(message.payload);

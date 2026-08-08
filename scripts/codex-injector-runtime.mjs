@@ -1,6 +1,34 @@
 const HOST_REQUEST_ERROR = "自动认领配置暂时无法应用，请刷新后重试";
 const AUTOMATION_SCHEMA_DIAGNOSTIC = "AUTOMATION_SCHEMA_MISMATCH";
 
+function parseLocalCapabilityPath(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) return null;
+  let url;
+  try {
+    url = new URL(value, "http://taskboard-bridge.invalid");
+  } catch {
+    return null;
+  }
+  if (
+    url.origin !== "http://taskboard-bridge.invalid"
+    || !value.startsWith("/")
+    || value.startsWith("//")
+    || url.hash
+  ) return null;
+
+  let allowedQuery = null;
+  if (url.pathname === "/api/meta" || url.pathname === "/api/device-workspaces") {
+    allowedQuery = new Set();
+  } else if (url.pathname === "/api/workflow-capabilities") {
+    allowedQuery = new Set(["workspacePath"]);
+  } else if (/^\/api\/projects\/[^/]+\/development-contexts$/.test(url.pathname)) {
+    allowedQuery = new Set(["codexProjectId", "codexThreadId", "workspacePath"]);
+  }
+  if (!allowedQuery) return null;
+  if ([...url.searchParams.keys()].some((key) => !allowedQuery.has(key))) return null;
+  return `${url.pathname}${url.search}`;
+}
+
 function parseHostRequest(payload, parseAutomationRequest) {
   if (typeof payload !== "string" || payload.length > 4_096) {
     return { id: null, request: null, error: HOST_REQUEST_ERROR };
@@ -20,6 +48,12 @@ function parseHostRequest(payload, parseAutomationRequest) {
   ) ? request.id : null;
   if (!id) return { id: null, request: null, error: HOST_REQUEST_ERROR };
   if (request.action === "ensure") return { id, request, error: null };
+  if (request.action === "local-capability") {
+    const path = parseLocalCapabilityPath(request.path);
+    return path
+      ? { id, request: { id, action: "local-capability", path }, error: null }
+      : { id, request: null, error: HOST_REQUEST_ERROR };
+  }
   if (request.action === "automation") {
     const parsed = parseAutomationRequest(request);
     return parsed
@@ -73,6 +107,8 @@ export async function handleHostBindingPayload(params, handlers) {
     let result;
     if (parsed.request.action === "ensure") {
       result = await handlers.ensure();
+    } else if (parsed.request.action === "local-capability") {
+      result = await handlers.getLocalCapability(parsed.request.path);
     } else if (parsed.request.action === "automation") {
       result = await handlers.runAutomation(parsed.request, params.executionContextId);
     } else {

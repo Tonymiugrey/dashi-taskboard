@@ -2,6 +2,8 @@ import { normalizeWorkflowSnapshot } from "../../shared/workflow-control-flow.mj
 
 const JSON_BODY_LIMIT = 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
+const BROWSER_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const BROWSER_SESSION_COOKIE = "__Host-codex-taskboard-session";
 const PROJECT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TASK_STATUSES = [
   "backlog",
@@ -325,12 +327,122 @@ function decodeBasicCredentials(header) {
   };
 }
 
+function encodeBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeBase64Url(value) {
+  if (typeof value !== "string" || !/^[a-z0-9_-]+$/i.test(value)) return null;
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(
+    Math.ceil(value.length / 4) * 4,
+    "=",
+  );
+  try {
+    return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+function cookieValue(header, name) {
+  for (const part of (header ?? "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 1 || part.slice(0, separator).trim() !== name) continue;
+    return part.slice(separator + 1).trim();
+  }
+  return null;
+}
+
+async function browserSessionKey(sharedSecret) {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(sharedSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+}
+
+async function createBrowserSession(username, sharedSecret) {
+  const expiresAt = Math.floor(Date.now() / 1000) + BROWSER_SESSION_TTL_SECONDS;
+  const payload = encodeBase64Url(new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    username,
+    expiresAt,
+  })));
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await browserSessionKey(sharedSecret),
+    new TextEncoder().encode(payload),
+  );
+  return {
+    expiresAt,
+    token: `${payload}.${encodeBase64Url(new Uint8Array(signature))}`,
+  };
+}
+
+async function verifyBrowserSession(token, sharedSecret) {
+  if (typeof token !== "string" || token.length > 4096) return null;
+  const [payload, signature, extra] = token.split(".");
+  if (!payload || !signature || extra !== undefined) return null;
+  const signatureBytes = decodeBase64Url(signature);
+  const payloadBytes = decodeBase64Url(payload);
+  if (!signatureBytes || !payloadBytes) return null;
+  const verified = await crypto.subtle.verify(
+    "HMAC",
+    await browserSessionKey(sharedSecret),
+    signatureBytes,
+    new TextEncoder().encode(payload),
+  );
+  if (!verified) return null;
+  let session;
+  try {
+    session = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payloadBytes));
+  } catch {
+    return null;
+  }
+  if (
+    session?.version !== 1
+    || !Number.isSafeInteger(session.expiresAt)
+    || session.expiresAt <= Math.floor(Date.now() / 1000)
+  ) return null;
+  try {
+    return stringField(session.username, "Session username", {
+      required: true,
+      maxLength: 120,
+    });
+  } catch {
+    return null;
+  }
+}
+
 function unauthorized() {
   return json(
     401,
     { error: { code: "UNAUTHORIZED", message: "Valid Basic credentials are required" } },
     { "www-authenticate": 'Basic realm="Codex Taskboard", charset="UTF-8"' },
   );
+}
+
+function actorForUsername(username, agent = false) {
+  const userId = `basic:${encodeURIComponent(username.toLowerCase())}`;
+  return agent
+    ? {
+      type: "agent",
+      id: `${userId}:codex-agent`,
+      name: `Codex Agent (${username})`,
+      avatarUrl: null,
+      username,
+    }
+    : {
+      type: "user",
+      id: userId,
+      name: username,
+      avatarUrl: null,
+      username,
+    };
 }
 
 async function authenticate(request, env) {
@@ -342,34 +454,30 @@ async function authenticate(request, env) {
     );
   }
   const credentials = decodeBasicCredentials(request.headers.get("authorization"));
-  if (!credentials) return null;
-  const encoder = new TextEncoder();
-  const [providedSecret, configuredSecret] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encoder.encode(credentials.password)),
-    crypto.subtle.digest("SHA-256", encoder.encode(env.TASKBOARD_SHARED_SECRET)),
-  ]);
-  if (!crypto.subtle.timingSafeEqual(providedSecret, configuredSecret)) return null;
-  const username = stringField(credentials.username, "Basic username", {
-    required: true,
-    maxLength: 120,
-  });
-  const userId = `basic:${encodeURIComponent(username.toLowerCase())}`;
-  if (request.headers.get("x-taskboard-client") === "taskctl") {
-    return {
-      type: "agent",
-      id: `${userId}:codex-agent`,
-      name: `Codex Agent (${username})`,
-      avatarUrl: null,
+  if (credentials) {
+    const encoder = new TextEncoder();
+    const [providedSecret, configuredSecret] = await Promise.all([
+      crypto.subtle.digest("SHA-256", encoder.encode(credentials.password)),
+      crypto.subtle.digest("SHA-256", encoder.encode(env.TASKBOARD_SHARED_SECRET)),
+    ]);
+    if (!crypto.subtle.timingSafeEqual(providedSecret, configuredSecret)) return null;
+    const username = stringField(credentials.username, "Basic username", {
+      required: true,
+      maxLength: 120,
+    });
+    return actorForUsername(
       username,
-    };
+      request.headers.get("x-taskboard-client") === "taskctl",
+    );
   }
-  return {
-    type: "user",
-    id: userId,
-    name: username,
-    avatarUrl: null,
-    username,
-  };
+  const sessionToken = cookieValue(request.headers.get("cookie"), BROWSER_SESSION_COOKIE);
+  const requestOrigin = new URL(request.url).origin;
+  const suppliedOrigin = request.headers.get("origin");
+  if (sessionToken && suppliedOrigin && suppliedOrigin !== requestOrigin) return null;
+  const username = sessionToken
+    ? await verifyBrowserSession(sessionToken, env.TASKBOARD_SHARED_SECRET)
+    : null;
+  return username ? actorForUsername(username) : null;
 }
 
 function resolveAssignee(target, actor) {
@@ -628,6 +736,8 @@ async function hydrateComment(env, row) {
       SELECT
         comment_mentions.target_id,
         comment_mentions.target_name,
+        comment_mentions.instruction,
+        comment_mentions.mention_order,
         codex_trigger_deliveries.status,
         codex_trigger_deliveries.thread_id,
         codex_trigger_deliveries.error
@@ -636,12 +746,14 @@ async function hydrateComment(env, row) {
         ON codex_trigger_deliveries.comment_id = comment_mentions.comment_id
         AND codex_trigger_deliveries.target_id = comment_mentions.target_id
       WHERE comment_mentions.comment_id = ?
-      ORDER BY comment_mentions.created_at, comment_mentions.target_id
+      ORDER BY comment_mentions.mention_order, comment_mentions.target_id
     `).bind(row.id)),
   ]);
   return commentFromRow(row, attachments, mentionRows.map((mention) => ({
     targetId: mention.target_id,
     targetName: mention.target_name,
+    instruction: mention.instruction ?? "",
+    order: mention.mention_order,
     status: mention.status,
     threadId: mention.thread_id,
     error: mention.error,
@@ -856,8 +968,16 @@ function parseCodexMentions(value) {
   }
   const mentions = value.map((mention, index) => {
     assertPlainObject(mention);
-    assertAllowedKeys(mention, new Set(["targetId"]));
-    return { targetId: parseCodexTargetId(mention.targetId, `mentions[${index}].targetId`) };
+    assertAllowedKeys(mention, new Set(["targetId", "instruction"]));
+    return {
+      targetId: parseCodexTargetId(mention.targetId, `mentions[${index}].targetId`),
+      instruction: stringField(
+        mention.instruction ?? "",
+        `mentions[${index}].instruction`,
+        { maxLength: 20_000 },
+      ),
+      order: index,
+    };
   });
   if (new Set(mentions.map((mention) => mention.targetId)).size !== mentions.length) {
     throw new ApiError(400, "INVALID_FIELD", "'mentions' cannot contain duplicate targets");
@@ -889,15 +1009,53 @@ function parseCodexTargetHeartbeat(body) {
 
 function parseCodexTriggerResult(body) {
   assertPlainObject(body);
-  assertAllowedKeys(body, new Set(["claimToken", "status", "threadId", "error"]));
+  assertAllowedKeys(body, new Set(["claimToken", "status", "threadId", "error", "checkpoint"]));
   if (body.status !== "completed" && body.status !== "failed") {
     throw new ApiError(400, "INVALID_FIELD", "'status' must be completed or failed");
+  }
+  let checkpoint;
+  if (body.checkpoint !== undefined) {
+    assertPlainObject(body.checkpoint);
+    assertAllowedKeys(body.checkpoint, new Set([
+      "summary",
+      "changedFiles",
+      "baseCommit",
+      "resultCommit",
+      "branch",
+    ]));
+    if (!Array.isArray(body.checkpoint.changedFiles) || body.checkpoint.changedFiles.length > 50) {
+      throw new ApiError(400, "INVALID_FIELD", "'checkpoint.changedFiles' must contain at most 50 paths");
+    }
+    checkpoint = {
+      summary: stringField(body.checkpoint.summary, "checkpoint.summary", {
+        required: true,
+        maxLength: 4_000,
+      }),
+      changedFiles: body.checkpoint.changedFiles.map((filename, index) => stringField(
+        filename,
+        `checkpoint.changedFiles[${index}]`,
+        { required: true, maxLength: 1_000 },
+      )),
+      baseCommit: stringField(body.checkpoint.baseCommit ?? null, "checkpoint.baseCommit", {
+        nullable: true,
+        maxLength: 64,
+      }),
+      resultCommit: stringField(body.checkpoint.resultCommit ?? null, "checkpoint.resultCommit", {
+        nullable: true,
+        maxLength: 64,
+      }),
+      branch: stringField(body.checkpoint.branch ?? null, "checkpoint.branch", {
+        nullable: true,
+        maxLength: 512,
+      }),
+    };
   }
   return {
     claimToken: stringField(body.claimToken, "claimToken", { required: true, maxLength: 128 }),
     status: body.status,
     threadId: parseThreadId(body.threadId),
     error: stringField(body.error ?? null, "error", { nullable: true, maxLength: 4_000 }),
+    checkpoint,
   };
 }
 
@@ -1739,7 +1897,12 @@ async function createComment(env, taskId, input, actor) {
         `Codex target '${mention.targetId}' is not available for this project`,
       );
     }
-    mentionedTargets.push(target);
+    mentionedTargets.push({
+      id: target.id,
+      name: target.name,
+      instruction: mention.instruction,
+      order: mention.order,
+    });
   }
   await env.DB.prepare(`
     INSERT INTO comments (
@@ -1760,9 +1923,17 @@ async function createComment(env, taskId, input, actor) {
   ).run();
   for (const target of mentionedTargets) {
     await env.DB.prepare(`
-      INSERT INTO comment_mentions (comment_id, target_id, target_name, created_at)
-      VALUES (?, ?, ?, ?)
-    `).bind(id, target.id, target.name, timestamp).run();
+      INSERT INTO comment_mentions (
+        comment_id, target_id, target_name, instruction, mention_order, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      id,
+      target.id,
+      target.name,
+      target.instruction,
+      target.order,
+      timestamp,
+    ).run();
     if (actor.type === "user") {
       await env.DB.prepare(`
         INSERT INTO codex_trigger_deliveries (
@@ -1831,60 +2002,162 @@ async function claimCodexTrigger(env, targetId) {
   }
   const timestamp = now();
   const row = await env.DB.prepare(`
-    SELECT codex_trigger_deliveries.comment_id
+    SELECT
+      codex_trigger_deliveries.comment_id,
+      comments.task_id
     FROM codex_trigger_deliveries
-    WHERE target_id = ?
+    JOIN comments ON comments.id = codex_trigger_deliveries.comment_id
+    WHERE codex_trigger_deliveries.target_id = ?
       AND (
-        status = 'pending'
-        OR (status = 'claimed' AND lease_expires_at < ?)
+        codex_trigger_deliveries.status = 'pending'
+        OR (
+          codex_trigger_deliveries.status = 'claimed'
+          AND codex_trigger_deliveries.lease_expires_at < ?
+        )
       )
-    ORDER BY created_at, comment_id
+    ORDER BY codex_trigger_deliveries.created_at, codex_trigger_deliveries.comment_id
     LIMIT 1
   `).bind(targetId, timestamp).first();
   if (!row) return null;
 
   const claimToken = uuid();
   const leaseExpiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
-  const result = await env.DB.prepare(`
-    UPDATE codex_trigger_deliveries
-    SET
-      status = 'claimed',
-      claim_token = ?,
-      claimed_at = ?,
-      lease_expires_at = ?,
-      updated_at = ?
-    WHERE comment_id = ? AND target_id = ?
-      AND (
-        status = 'pending'
-        OR (status = 'claimed' AND lease_expires_at < ?)
-      )
-  `).bind(
-    claimToken,
-    timestamp,
-    leaseExpiresAt,
-    timestamp,
-    row.comment_id,
-    targetId,
-    timestamp,
-  ).run();
-  if (!changed(result)) return null;
+  const [leaseResult, deliveryResult] = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO codex_issue_leases (
+        task_id, comment_id, target_id, claim_token, claimed_at, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET
+        comment_id = excluded.comment_id,
+        target_id = excluded.target_id,
+        claim_token = excluded.claim_token,
+        claimed_at = excluded.claimed_at,
+        lease_expires_at = excluded.lease_expires_at
+      WHERE codex_issue_leases.lease_expires_at < excluded.claimed_at
+    `).bind(
+      row.task_id,
+      row.comment_id,
+      targetId,
+      claimToken,
+      timestamp,
+      leaseExpiresAt,
+    ),
+    env.DB.prepare(`
+      UPDATE codex_trigger_deliveries
+      SET
+        status = 'claimed',
+        claim_token = ?,
+        claimed_at = ?,
+        lease_expires_at = ?,
+        updated_at = ?
+      WHERE comment_id = ? AND target_id = ?
+        AND (
+          status = 'pending'
+          OR (status = 'claimed' AND lease_expires_at < ?)
+        )
+        AND EXISTS (
+          SELECT 1 FROM codex_issue_leases
+          WHERE task_id = ? AND claim_token = ?
+        )
+    `).bind(
+      claimToken,
+      timestamp,
+      leaseExpiresAt,
+      timestamp,
+      row.comment_id,
+      targetId,
+      timestamp,
+      row.task_id,
+      claimToken,
+    ),
+  ]);
+  if (!changed(leaseResult) || !changed(deliveryResult)) {
+    await env.DB.prepare("DELETE FROM codex_issue_leases WHERE claim_token = ?")
+      .bind(claimToken)
+      .run();
+    return null;
+  }
 
   const commentRow = await requireCommentRow(env, row.comment_id);
   const taskRowValue = await requireTaskRow(env, commentRow.task_id);
   const projectRow = await requireProject(env, taskRowValue.project_id);
+  const comment = await hydrateComment(env, commentRow);
+  const assignment = comment.mentions.find((mention) => mention.targetId === targetId);
+  if (!assignment) {
+    throw new ApiError(409, "CODEX_ASSIGNMENT_MISSING", "The claimed Codex assignment is missing");
+  }
+  const checkpointRows = await all(env.DB.prepare(`
+    SELECT
+      codex_execution_checkpoints.*,
+      codex_targets.name AS target_name
+    FROM codex_execution_checkpoints
+    LEFT JOIN codex_targets
+      ON codex_targets.id = codex_execution_checkpoints.target_id
+    WHERE codex_execution_checkpoints.task_id = ?
+    ORDER BY codex_execution_checkpoints.created_at DESC, codex_execution_checkpoints.id DESC
+    LIMIT 3
+  `).bind(taskRowValue.id));
   return {
     targetId,
     claimToken,
     leaseExpiresAt,
     project: projectFromRow(projectRow),
     task: await hydrateTask(env, taskRowValue),
-    comment: await hydrateComment(env, commentRow),
+    assignment,
+    comment: { ...comment, mentions: [assignment] },
+    context: {
+      checkpoints: checkpointRows.map((checkpoint) => ({
+        id: checkpoint.id,
+        targetId: checkpoint.target_id,
+        targetName: checkpoint.target_name,
+        status: checkpoint.status,
+        summary: checkpoint.summary,
+        changedFiles: JSON.parse(checkpoint.changed_files),
+        baseCommit: checkpoint.base_commit,
+        resultCommit: checkpoint.result_commit,
+        branch: checkpoint.branch,
+        createdAt: checkpoint.created_at,
+      })),
+    },
   };
 }
 
 async function finishCodexTrigger(env, commentId, targetId, input) {
   const timestamp = now();
-  const result = await env.DB.prepare(`
+  const comment = await requireCommentRow(env, commentId);
+  const statements = [];
+  if (input.checkpoint) {
+    statements.push(env.DB.prepare(`
+      INSERT INTO codex_execution_checkpoints (
+        id, task_id, comment_id, target_id, status, summary, changed_files,
+        base_commit, result_commit, branch, created_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM codex_trigger_deliveries
+        WHERE comment_id = ? AND target_id = ?
+          AND status = 'claimed' AND claim_token = ?
+      )
+    `).bind(
+      uuid(),
+      comment.task_id,
+      commentId,
+      targetId,
+      input.status,
+      input.checkpoint.summary,
+      JSON.stringify(input.checkpoint.changedFiles),
+      input.checkpoint.baseCommit,
+      input.checkpoint.resultCommit,
+      input.checkpoint.branch,
+      timestamp,
+      commentId,
+      targetId,
+      input.claimToken,
+    ));
+  }
+  const deliveryUpdateIndex = statements.length;
+  statements.push(env.DB.prepare(`
     UPDATE codex_trigger_deliveries
     SET
       status = ?,
@@ -1904,12 +2177,17 @@ async function finishCodexTrigger(env, commentId, targetId, input) {
     commentId,
     targetId,
     input.claimToken,
-  ).run();
+  ));
+  statements.push(env.DB.prepare(`
+    DELETE FROM codex_issue_leases
+    WHERE task_id = ? AND comment_id = ? AND target_id = ? AND claim_token = ?
+  `).bind(comment.task_id, commentId, targetId, input.claimToken));
+  const results = await env.DB.batch(statements);
+  const result = results[deliveryUpdateIndex];
   if (!changed(result)) {
     throw new ApiError(409, "CODEX_TRIGGER_CLAIM_LOST", "This Codex trigger is no longer claimed by this device");
   }
-  const row = await requireCommentRow(env, commentId);
-  return hydrateComment(env, row);
+  return hydrateComment(env, comment);
 }
 
 async function requireCommentRow(env, id) {
@@ -2470,6 +2748,24 @@ export default {
 
       const actor = await authenticate(request, env);
       if (!actor) return withSecurityHeaders(unauthorized());
+
+      if (url.pathname === "/api/auth/session") {
+        if (!decodeBasicCredentials(request.headers.get("authorization"))) {
+          return withSecurityHeaders(unauthorized());
+        }
+        if (request.method !== "POST") methodNotAllowed(["POST"]);
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Browser session routes do not accept query parameters");
+        }
+        const session = await createBrowserSession(actor.username, env.TASKBOARD_SHARED_SECRET);
+        return withSecurityHeaders(json(200, {
+          cookieName: BROWSER_SESSION_COOKIE,
+          sessionToken: session.token,
+          expiresAt: new Date(session.expiresAt * 1000).toISOString(),
+        }, {
+          "set-cookie": `${BROWSER_SESSION_COOKIE}=${session.token}; Path=/; Max-Age=${BROWSER_SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=None`,
+        }));
+      }
 
       const response = url.pathname.startsWith("/api/")
         ? await routeApi(request, env, actor, url)

@@ -12,7 +12,7 @@ const webApp = await readFile(new URL("../web/src/App.tsx", import.meta.url), "u
 
 test("injection is an idempotent IIFE guarded by its current source hash", () => {
   assert.match(source, /^\(\(\) => \{/);
-  assert.match(source, /const VERSION = "0\.6\.8"/);
+  assert.match(source, /const VERSION = "0\.7\.0"/);
   assert.match(source, /const SOURCE_HASH = window\.__CODEX_TASKBOARD_SOURCE_HASH__/);
   assert.match(source, /const SENTINEL_KEY = "__codexTaskboardInjection__"/);
   assert.match(source, /previous\?\.sourceHash === SOURCE_HASH/);
@@ -211,13 +211,19 @@ test("complete App automation payloads cross the injected forwarder into the cur
   }
 });
 
-test("only a loopback Taskboard iframe can request native automation", () => {
-  assert.match(source, /function isLocalTaskboardOrigin\(origin\)/);
-  assert.match(source, /hostname === "127\.0\.0\.1" \|\| hostname === "localhost"/);
-  assert.match(
-    source,
-    /if \(!isLocalTaskboardOrigin\(frameOrigin\)\) \{\s*postToFrame\(\{\s*type: "taskboard:automation-response"/,
-  );
+test("only the managed iframe with the live bridge nonce can request native automation", () => {
+  assert.match(source, /function isManagedTaskboardOrigin\(origin\)/);
+  assert.match(source, /new URL\(origin\)\.origin === managedTaskboardOrigin\(\)/);
+  assert.match(source, /payload\?\.bridgeSessionNonce !== bridgeSessionNonce/);
+  assert.match(source, /error: "Codex 本机桥会话无效"/);
+});
+
+test("the managed cloud iframe can read only fixed local capabilities through the host binding", () => {
+  assert.match(source, /type: "taskboard:local-capability-response"/);
+  assert.match(source, /requestHost\("local-capability", \{ path: payload\.path \}\)/);
+  assert.match(source, /payload\?\.sessionNonce !== bridgeSessionNonce/);
+  assert.match(source, /message\.type === "taskboard:local-capability-request"/);
+  assert.match(source, /capabilities: \["automation", "local-capabilities", "native-navigation"\]/);
 });
 
 test("issues open an unsent native Codex composer in the exact workspace with a Skill mention", () => {

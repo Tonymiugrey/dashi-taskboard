@@ -68,12 +68,31 @@ function assistantSummary(events) {
   );
 }
 
-function buildEntry({ trigger, status, threadId, runId, events, error, now }) {
+export function buildExecutionCheckpoint({
+  status,
+  runId,
+  events,
+  error,
+  baseCommit = null,
+  resultCommit = null,
+  branch = null,
+}) {
   const relevantEvents = runEvents(events, runId);
-  const files = changedFiles(relevantEvents);
-  const summary = status === "completed"
-    ? assistantSummary(relevantEvents) || "Codex 已完成本次 @ 触发；未返回可记录的文字摘要。"
-    : compactText(error) || "Codex 未完成本次 @ 触发。";
+  return {
+    summary: status === "completed"
+      ? assistantSummary(relevantEvents) || "Codex completed the assigned work."
+      : compactText(error) || "Codex did not complete the assigned work.",
+    changedFiles: changedFiles(relevantEvents),
+    baseCommit,
+    resultCommit,
+    branch,
+  };
+}
+
+function buildEntry({ trigger, status, threadId, runId, events, error, now }) {
+  const checkpoint = buildExecutionCheckpoint({ status, runId, events, error });
+  const files = checkpoint.changedFiles;
+  const summary = checkpoint.summary;
   const taskIdentifier = compactText(trigger.task.identifier, 300);
   const taskTitle = compactText(trigger.task.title, 300);
   const taskLabel = taskIdentifier && taskTitle

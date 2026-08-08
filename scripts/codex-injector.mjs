@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -26,9 +27,10 @@ const projectRoot = path.resolve(path.dirname(injectorPath), "..");
 const defaultCodexDebuggingPort = 9229;
 const injectionPath = path.join(projectRoot, "inject", "codex-taskboard.user.js");
 const automationPoliciesPath = path.join(projectRoot, ".data", "codex-automation-policies.json");
+const cloudConfigPath = path.join(projectRoot, ".data", "cloud-companion.json");
 const taskboardOrigin = `http://127.0.0.1:${resolvePort()}`;
 const taskboardHealthUrl = `${taskboardOrigin}/health`;
-const taskboardPageUrl = `${taskboardOrigin}/?host=codex`;
+const localTaskboardPageUrl = `${taskboardOrigin}/?host=codex`;
 const hostBindingName = "__codexTaskboardHostV1";
 const hostHeartbeatName = "__codexTaskboardHostHeartbeatV1";
 const hostStartupTokenName = "__codexTaskboardHostStartupTokenV1";
@@ -93,10 +95,30 @@ function parseArgs(argv) {
   return options;
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
+async function fetchJson(url, init) {
+  const response = await fetch(url, init);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json();
+}
+
+async function resolveEmbeddedTaskboardContext() {
+  const session = await fetchJson(`${taskboardOrigin}/api/local/cloud-session`).catch(() => null);
+  const origin = session?.mode === "cloud" && typeof session.remoteUrl === "string"
+    ? session.remoteUrl
+    : taskboardOrigin;
+  const url = new URL(origin);
+  url.pathname = "/";
+  url.search = "";
+  url.searchParams.set("host", "codex");
+  const browserSession = session?.mode === "cloud"
+    ? await fetchJson(`${taskboardOrigin}/api/local/cloud-browser-session`, { method: "POST" })
+    : null;
+  return {
+    url: url.href,
+    browserSession: browserSession
+      ? { ...browserSession, origin: new URL(origin).origin }
+      : null,
+  };
 }
 
 async function isReachable(url) {
@@ -118,9 +140,18 @@ async function waitUntilReachable(url, timeoutMs) {
 }
 
 function startTaskboard({ detached }) {
+  let bridgeOnly = false;
+  try {
+    bridgeOnly = Boolean(JSON.parse(readFileSync(cloudConfigPath, "utf8")).remoteUrl);
+  } catch {}
   return spawn(process.execPath, [path.join(projectRoot, "server", "index.mjs")], {
     cwd: projectRoot,
     detached,
+    env: {
+      ...process.env,
+      CODEX_TASKBOARD_HOST: "127.0.0.1",
+      CODEX_TASKBOARD_BRIDGE_ONLY: bridgeOnly ? "1" : "0",
+    },
     stdio: detached ? "ignore" : "inherit",
   });
 }
@@ -959,6 +990,10 @@ async function installTaskboardHostBinding(cdp, supervisor) {
     await handleHostBindingPayload(params, {
       parseAutomationRequest: parseTaskboardAutomationHostRequest,
       ensure: () => supervisor.ensure({ force: true }),
+      getLocalCapability: async (pathname) => {
+        await supervisor.ensure({ force: true });
+        return { data: await fetchJson(new URL(pathname, taskboardOrigin)) };
+      },
       runAutomation: (request, executionContextId) => (
         (async () => {
           const rpc = (method, body) => requestCodexAutomationViaCdp(
@@ -1059,6 +1094,31 @@ async function registerInjectionSource(cdp, source) {
   return registration.identifier;
 }
 
+async function installCloudBrowserSession(cdp, browserSession) {
+  if (!browserSession) return;
+  const expires = Date.parse(browserSession.expiresAt) / 1000;
+  if (
+    browserSession.cookieName !== "__Host-codex-taskboard-session"
+    || typeof browserSession.sessionToken !== "string"
+    || browserSession.sessionToken.length > 4096
+    || !Number.isFinite(expires)
+    || expires <= Date.now() / 1000
+    || new URL(browserSession.origin).protocol !== "https:"
+  ) throw new Error("Cloud browser session is invalid");
+  await cdp.send("Network.enable");
+  const cookie = await cdp.send("Network.setCookie", {
+    name: browserSession.cookieName,
+    value: browserSession.sessionToken,
+    url: `${browserSession.origin}/`,
+    path: "/",
+    secure: true,
+    httpOnly: true,
+    sameSite: "None",
+    expires,
+  });
+  if (cookie.success !== true) throw new Error("Cloud browser session cookie was rejected");
+}
+
 async function injectTarget(
   target,
   source,
@@ -1069,6 +1129,7 @@ async function injectTarget(
   supervisor,
   attachExisting,
   startupToken,
+  browserSession,
 ) {
   const cdp = new CdpConnection(target.webSocketDebuggerUrl);
   let retained = false;
@@ -1077,6 +1138,7 @@ async function injectTarget(
     await cdp.send("Page.enable");
     await cdp.send("Page.setBypassCSP", { enabled: true });
     await cdp.send("Runtime.enable");
+    await installCloudBrowserSession(cdp, browserSession);
     if (keepAlive) await installTaskboardHostBinding(cdp, supervisor);
     if (keepAlive && attachExisting) {
       const currentStatus = await readInjectionStatus(cdp);
@@ -1170,6 +1232,7 @@ async function injectAll(
   supervisor,
   attachExisting,
   startupToken,
+  browserSession,
 ) {
   const targets = await codexTargets(port);
   if (targets.length === 0) throw new Error("No Codex renderer target found");
@@ -1196,6 +1259,7 @@ async function injectAll(
       supervisor,
       attachExisting,
       startupToken,
+      browserSession,
     );
     if (connection) injectedTargets.set(target.id, connection);
     results.push({ targetId: target.id, title: target.title, url: target.url, ...result });
@@ -1205,16 +1269,28 @@ async function injectAll(
 
 async function currentInjectionSource() {
   const userScript = await readFile(injectionPath, "utf8");
-  const runtimeSource = `window.__CODEX_TASKBOARD_MANAGED_ORIGIN__ = ${JSON.stringify(taskboardOrigin)};
-if (typeof window.__CODEX_TASKBOARD_URL__ !== "string" || !window.__CODEX_TASKBOARD_URL__.trim()) {
-  window.__CODEX_TASKBOARD_URL__ = ${JSON.stringify(taskboardPageUrl)};
+  const embeddedContext = await resolveEmbeddedTaskboardContext();
+  const embeddedTaskboardUrl = embeddedContext.url;
+  const runtimeSource = `(() => {
+const previousManagedUrl = window.__CODEX_TASKBOARD_MANAGED_URL__;
+if (
+  typeof window.__CODEX_TASKBOARD_URL__ !== "string"
+  || !window.__CODEX_TASKBOARD_URL__.trim()
+  || window.__CODEX_TASKBOARD_URL__ === previousManagedUrl
+  || (!previousManagedUrl && window.__CODEX_TASKBOARD_URL__ === ${JSON.stringify(localTaskboardPageUrl)})
+) {
+  window.__CODEX_TASKBOARD_URL__ = ${JSON.stringify(embeddedTaskboardUrl)};
 }
+window.__CODEX_TASKBOARD_MANAGED_URL__ = ${JSON.stringify(embeddedTaskboardUrl)};
+window.__CODEX_TASKBOARD_MANAGED_ORIGIN__ = new URL(window.__CODEX_TASKBOARD_URL__).origin;
+})();
 ${userScript}`;
   const sourceHash = createHash("sha256").update(runtimeSource).digest("hex");
   return {
     sourceHash,
     source: `window[${JSON.stringify(injectionSourceHashName)}] = ${JSON.stringify(sourceHash)};
 ${runtimeSource}`,
+    browserSession: embeddedContext.browserSession,
   };
 }
 
@@ -1285,7 +1361,9 @@ async function main() {
       await waitUntilReachable(cdpVersionUrl, 30_000);
     }
 
-    const { source, sourceHash } = await currentInjectionSource();
+    const { source, sourceHash, browserSession } = await currentInjectionSource();
+    let activeBrowserSession = browserSession;
+    let browserSessionRefreshAfter = Date.now() + 6 * 60 * 60 * 1000;
     const injectedTargets = new Map();
     const firstResults = await injectAll(
       options.port,
@@ -1298,6 +1376,7 @@ async function main() {
       supervisor,
       options.attachExisting,
       options.startupToken,
+      activeBrowserSession,
     );
     console.log(JSON.stringify({ injected: firstResults }, null, 2));
 
@@ -1326,6 +1405,18 @@ async function main() {
           await publishHostHeartbeat(connection, options.startupToken);
         } catch (_) {}
       }
+      if (activeBrowserSession && Date.now() >= browserSessionRefreshAfter) {
+        try {
+          activeBrowserSession = (await resolveEmbeddedTaskboardContext()).browserSession;
+          for (const connection of injectedTargets.values()) {
+            await installCloudBrowserSession(connection, activeBrowserSession);
+          }
+          browserSessionRefreshAfter = Date.now() + 6 * 60 * 60 * 1000;
+        } catch (error) {
+          browserSessionRefreshAfter = Date.now() + 60_000;
+          console.error(`Cloud browser session refresh failed: ${error.message}`);
+        }
+      }
       try {
         const results = await injectAll(
           options.port,
@@ -1338,6 +1429,7 @@ async function main() {
           supervisor,
           options.attachExisting,
           options.startupToken,
+          activeBrowserSession,
         );
         if (results.length > 0) console.log(JSON.stringify({ injected: results }, null, 2));
       } catch (error) {

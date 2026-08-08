@@ -463,7 +463,7 @@ export class TaskboardDatabase {
             CASE WHEN EXISTS (
               SELECT 1
               FROM comments
-              WHERE comments.task_id = tasks.id
+              WHERE comments.task_id = task_threads.task_id
                 AND comments.thread_id = task_threads.thread_id
             ) THEN 1 ELSE 0 END,
             task_threads.created_at DESC,

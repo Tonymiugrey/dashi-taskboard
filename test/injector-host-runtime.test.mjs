@@ -56,6 +56,54 @@ test("a stale automation parser receives an immediate host error instead of timi
   }]);
 });
 
+test("the host bridge accepts only whitelisted local capability reads", async () => {
+  const responses = [];
+  const paths = [];
+  const handlers = {
+    parseAutomationRequest: () => null,
+    ensure: async () => assert.fail("ensure must not run"),
+    getLocalCapability: async (path) => {
+      paths.push(path);
+      return { data: { available: true } };
+    },
+    runAutomation: async () => assert.fail("automation must not run"),
+    prefill: async () => assert.fail("prefill must not run"),
+    sendResponse: async (_executionContextId, response) => responses.push(response),
+  };
+
+  const accepted = await handleHostBindingPayload({
+    payload: JSON.stringify({
+      id: "local-capability-1",
+      action: "local-capability",
+      path: "/api/projects/project-1/development-contexts?workspacePath=%2Ftmp%2Fproject",
+    }),
+    executionContextId: 21,
+  }, handlers);
+  assert.deepEqual(accepted, { responded: true, accepted: true });
+  assert.deepEqual(paths, [
+    "/api/projects/project-1/development-contexts?workspacePath=%2Ftmp%2Fproject",
+  ]);
+  assert.deepEqual(responses, [{
+    id: "local-capability-1",
+    ok: true,
+    data: { available: true },
+  }]);
+
+  for (const path of [
+    "https://example.com/api/meta",
+    "//example.com/api/meta",
+    "/api/tasks",
+    "/api/meta?unexpected=true",
+  ]) {
+    const result = await handleHostBindingPayload({
+      payload: JSON.stringify({ id: `rejected-${responses.length}`, action: "local-capability", path }),
+      executionContextId: 22,
+    }, handlers);
+    assert.deepEqual(result, { responded: true, accepted: false }, path);
+  }
+  assert.equal(paths.length, 1);
+});
+
 test("attach replaces an old runtime with the current source and restores an open page", async () => {
   const calls = [];
   const result = await reconcileInjectionRuntime({

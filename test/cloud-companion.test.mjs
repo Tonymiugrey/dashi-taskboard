@@ -513,11 +513,13 @@ test("configured server proxies business APIs without touching local rows and ad
   temporaryDirectories.push(directory);
   const configPath = path.join(directory, "companion.json");
   const { createCloudConfigStore } = await importCloudConfig();
-  await createCloudConfigStore({ configPath }).configure({
+  const configStore = createCloudConfigStore({ configPath });
+  await configStore.configure({
     remoteUrl: "https://tasks.example.test",
     actorName: "Alice",
     sharedKey: "two-person-shared-key",
   });
+  await configStore.setProjectWorkspace("portfolio", directory);
   const upstreamCalls = [];
   const app = createTaskboardServer({
     dataDirectory: directory,
@@ -532,21 +534,71 @@ test("configured server proxies business APIs without touching local rows and ad
 
   try {
     const metadata = await fetch(`${baseUrl}/api/meta`).then((response) => response.json());
-    assert.deepEqual(metadata, {
-      mode: "cloud",
-      realtime: { transport: "poll", intervalMs: 2000 },
-      localCapabilities: { available: true },
-      manageTaskboardSkillPath: app.options.skillPath,
-    });
+    assert.equal(metadata.mode, "cloud");
+    assert.deepEqual(metadata.realtime, { transport: "poll", intervalMs: 2000 });
+    assert.deepEqual(metadata.localCapabilities, { available: true });
+    assert.equal(metadata.manageTaskboardSkillPath, app.options.skillPath);
     const session = await fetch(`${baseUrl}/api/local/cloud-session`)
       .then((response) => response.json());
     assert.equal(Object.hasOwn(session, "sharedKey"), false);
+    const workspaces = await fetch(`${baseUrl}/api/device-workspaces`)
+      .then((response) => response.json());
+    assert.equal(workspaces.workspaces.portfolio, directory);
+
+    for (const pathname of [
+      `/api/workflow-capabilities?workspacePath=${encodeURIComponent("/unmapped")}`,
+      `/api/projects/portfolio/development-contexts?workspacePath=${encodeURIComponent("/unmapped")}`,
+    ]) {
+      const rejected = await fetch(`${baseUrl}${pathname}`);
+      assert.equal(rejected.status, 403, pathname);
+      assert.equal((await rejected.json()).error.code, "WORKSPACE_NOT_MAPPED", pathname);
+    }
 
     const response = await fetch(`${baseUrl}/api/tasks`);
     assert.equal(response.status, 200);
     assert.equal(upstreamCalls.length, 1);
     assert.equal(upstreamCalls[0].url, "https://tasks.example.test/api/tasks");
     assert.equal(app.database.listTasks({}).length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the loopback companion obtains a cloud iframe session without returning the shared key", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "taskboard-cloud-session-"));
+  temporaryDirectories.push(directory);
+  const configPath = path.join(directory, "companion.json");
+  const { createCloudConfigStore } = await importCloudConfig();
+  await createCloudConfigStore({ configPath }).configure({
+    remoteUrl: "https://tasks.example.test",
+    actorName: "Alice",
+    sharedKey: "two-person-shared-key",
+  });
+  const upstreamCalls = [];
+  const app = createTaskboardServer({
+    dataDirectory: directory,
+    cloudConfigPath: configPath,
+    remoteFetch: async (url, init) => {
+      upstreamCalls.push({ url: url.toString(), init });
+      return jsonResponse({
+        cookieName: "__Host-codex-taskboard-session",
+        sessionToken: "payload.signature",
+        expiresAt: "2026-08-16T00:00:00.000Z",
+      });
+    },
+  });
+  const address = await app.listen({ port: 0 });
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/local/cloud-browser-session`,
+      { method: "POST" },
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.sessionToken, "payload.signature");
+    assert.equal(Object.hasOwn(body, "sharedKey"), false);
+    assert.equal(upstreamCalls[0].url, "https://tasks.example.test/api/auth/session");
+    assert.match(upstreamCalls[0].init.headers.get("authorization"), /^Basic /);
   } finally {
     await app.close();
   }

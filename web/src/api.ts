@@ -28,6 +28,90 @@ const DEFAULT_USER_ACTOR: ActorIdentity = {
 };
 
 let currentUserActor = DEFAULT_USER_ACTOR;
+let hostBridgeSessionNonce: string | null = null;
+
+interface PendingLocalCapabilityRequest {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timeoutId: number;
+  cleanup?: () => void;
+}
+
+const pendingLocalCapabilityRequests = new Map<string, PendingLocalCapabilityRequest>();
+
+function isBridgeSessionNonce(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
+}
+
+export function setHostBridgeSession(sessionNonce?: string) {
+  const next = isBridgeSessionNonce(sessionNonce) ? sessionNonce : null;
+  if (next === hostBridgeSessionNonce) return;
+  hostBridgeSessionNonce = next;
+  for (const pending of pendingLocalCapabilityRequests.values()) {
+    window.clearTimeout(pending.timeoutId);
+    pending.cleanup?.();
+    pending.reject(new Error("Codex 本机桥会话已更新，请重试"));
+  }
+  pendingLocalCapabilityRequests.clear();
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (event.source !== window.parent || !event.data || typeof event.data !== "object") return;
+    const message = event.data as { type?: string; payload?: unknown };
+    if (message.type !== "taskboard:local-capability-response" || !message.payload) return;
+    const payload = message.payload as {
+      requestId?: unknown;
+      sessionNonce?: unknown;
+      ok?: unknown;
+      data?: unknown;
+      error?: unknown;
+    };
+    if (
+      typeof payload.requestId !== "string"
+      || payload.sessionNonce !== hostBridgeSessionNonce
+    ) return;
+    const pending = pendingLocalCapabilityRequests.get(payload.requestId);
+    if (!pending) return;
+    window.clearTimeout(pending.timeoutId);
+    pending.cleanup?.();
+    pendingLocalCapabilityRequests.delete(payload.requestId);
+    if (payload.ok === true) pending.resolve(payload.data);
+    else pending.reject(new Error(
+      typeof payload.error === "string" ? payload.error : "Codex 本机桥请求失败",
+    ));
+  });
+}
+
+function requestLocalCapability<T>(path: string, signal?: AbortSignal): Promise<T> | null {
+  if (!hostBridgeSessionNonce || typeof window === "undefined" || window.parent === window) return null;
+  if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  const requestId = window.crypto.randomUUID();
+  const sessionNonce = hostBridgeSessionNonce;
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      pendingLocalCapabilityRequests.get(requestId)?.cleanup?.();
+      pendingLocalCapabilityRequests.delete(requestId);
+      reject(new Error("Codex 本机桥没有响应"));
+    }, 10_000);
+    const abort = () => {
+      window.clearTimeout(timeoutId);
+      pendingLocalCapabilityRequests.delete(requestId);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal) signal.addEventListener("abort", abort, { once: true });
+    pendingLocalCapabilityRequests.set(requestId, {
+      resolve: (value) => resolve(value as T),
+      reject,
+      timeoutId,
+      ...(signal ? { cleanup: () => signal.removeEventListener("abort", abort) } : {}),
+    });
+    window.parent.postMessage({
+      type: "taskboard:local-capability-request",
+      payload: { requestId, sessionNonce, path },
+    }, "*");
+  });
+}
 
 export function setCurrentUserActor(actor?: ActorIdentity) {
   currentUserActor = actor?.type === "user" ? actor : DEFAULT_USER_ACTOR;
@@ -75,7 +159,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(0, {
       error: {
         code: "SERVICE_UNAVAILABLE",
-        message: "无法连接本地 Taskboard 服务，请重新通过 Taskboard 启动 Codex。",
+        message: "无法连接 Taskboard 服务，请检查网络或重新打开任务面板。",
       },
     });
   }
@@ -91,7 +175,16 @@ export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
 }
 
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
-  return request<TaskboardMetadata>("/api/meta", { signal });
+  const cloudMetadata = await request<TaskboardMetadata>("/api/meta", { signal });
+  const localRequest = requestLocalCapability<TaskboardMetadata>("/api/meta", signal);
+  if (!localRequest) return cloudMetadata;
+  const localMetadata = await localRequest;
+  return {
+    ...cloudMetadata,
+    manageTaskboardSkillPath: localMetadata.manageTaskboardSkillPath,
+    iHaveAdhdSkill: localMetadata.iHaveAdhdSkill,
+    localCapabilities: { available: true },
+  };
 }
 
 export async function getTaskboardRevision(
@@ -209,7 +302,13 @@ export function subscribeAiChatThread(
 
 export async function listDeviceWorkspaces(signal?: AbortSignal): Promise<Record<string, string>> {
   try {
-    const data = await request<{ workspaces: Record<string, string> }>("/api/device-workspaces", { signal });
+    const localRequest = requestLocalCapability<{ workspaces: Record<string, string> }>(
+      "/api/device-workspaces",
+      signal,
+    );
+    const data = localRequest
+      ? await localRequest
+      : await request<{ workspaces: Record<string, string> }>("/api/device-workspaces", { signal });
     return data.workspaces;
   } catch (error) {
     if (error instanceof ApiError && error.code === "LOCAL_COMPANION_REQUIRED") return {};
@@ -224,7 +323,9 @@ export async function listWorkflowCapabilities(
   const query = new URLSearchParams();
   if (workspacePath) query.set("workspacePath", workspacePath);
   const suffix = query.size > 0 ? `?${query}` : "";
-  return request<WorkflowCapabilities>(`/api/workflow-capabilities${suffix}`, { signal });
+  const path = `/api/workflow-capabilities${suffix}`;
+  return requestLocalCapability<WorkflowCapabilities>(path, signal)
+    ?? request<WorkflowCapabilities>(path, { signal });
 }
 
 export async function getWorkflowWorkspace<T>(
@@ -277,32 +378,91 @@ export async function listDevelopmentContexts(
   if (codexThreadId) query.set("codexThreadId", codexThreadId);
   if (workspacePath) query.set("workspacePath", workspacePath);
   const suffix = query.size > 0 ? `?${query}` : "";
-  return request<DevelopmentScan>(
-    `/api/projects/${encodeURIComponent(projectId)}/development-contexts${suffix}`,
-    { signal },
+  const path = `/api/projects/${encodeURIComponent(projectId)}/development-contexts${suffix}`;
+  return requestLocalCapability<DevelopmentScan>(path, signal)
+    ?? request<DevelopmentScan>(path, { signal });
+}
+
+type TaskDraftPayload = Omit<TaskDraft, "developmentContext"> & {
+  developmentContext: TaskDraft["developmentContext"] | {
+    type: "worktree";
+    branch: string | null;
+  };
+};
+
+function taskDraftPayload(draft: TaskDraft): TaskDraftPayload {
+  if (draft.developmentContext?.type !== "worktree" || draft.developmentContext.path) return draft;
+  return {
+    ...draft,
+    developmentContext: {
+      type: "worktree",
+      branch: draft.developmentContext.branch,
+    },
+  };
+}
+
+function retainWorktreePath(task: Task, source?: Task | TaskDraft): Task {
+  if (
+    task.developmentContext?.type !== "worktree"
+    || task.developmentContext.path
+    || source?.developmentContext?.type !== "worktree"
+    || !source.developmentContext.path
+  ) return task;
+  return {
+    ...task,
+    developmentContext: {
+      ...task.developmentContext,
+      path: source.developmentContext.path,
+    },
+  };
+}
+
+async function localizeWorktreeTasks(
+  projectId: string,
+  tasks: Task[],
+  signal?: AbortSignal,
+): Promise<Task[]> {
+  if (!tasks.some((task) => task.developmentContext?.type === "worktree")) return tasks;
+  const localRequest = requestLocalCapability<DevelopmentScan>(
+    `/api/projects/${encodeURIComponent(projectId)}/development-contexts`,
+    signal,
   );
+  if (!localRequest) return tasks;
+  try {
+    const scan = await localRequest;
+    return tasks.map((task) => {
+      if (task.developmentContext?.type !== "worktree" || task.developmentContext.path) return task;
+      const local = scan.contexts.find((context) => (
+        context.type === "worktree" && context.branch === task.developmentContext?.branch
+      ));
+      return local ? { ...task, developmentContext: local } : task;
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    return tasks;
+  }
 }
 
 export async function listTasks(projectId: string, signal?: AbortSignal): Promise<Task[]> {
   const params = new URLSearchParams({ projectId, archived: "false" });
   const data = await request<{ tasks: Task[] }>(`/api/tasks?${params}`, { signal });
-  return data.tasks;
+  return localizeWorktreeTasks(projectId, data.tasks, signal);
 }
 
 export async function createTask(projectId: string, draft: TaskDraft, threadId?: string): Promise<Task> {
   const data = await request<{ task: Task }>("/api/tasks", {
     method: "POST",
-    body: JSON.stringify({ projectId, ...draft, ...(threadId ? { threadId } : {}) }),
+    body: JSON.stringify({ projectId, ...taskDraftPayload(draft), ...(threadId ? { threadId } : {}) }),
   });
-  return data.task;
+  return retainWorktreePath(data.task, draft);
 }
 
 export async function updateTask(task: Task, draft: TaskDraft, threadId?: string): Promise<Task> {
   const data = await request<{ task: Task }>(`/api/tasks/${encodeURIComponent(task.id)}`, {
     method: "PATCH",
-    body: JSON.stringify({ version: task.version, ...draft, ...(threadId ? { threadId } : {}) }),
+    body: JSON.stringify({ version: task.version, ...taskDraftPayload(draft), ...(threadId ? { threadId } : {}) }),
   });
-  return data.task;
+  return retainWorktreePath(data.task, draft);
 }
 
 export async function moveTask(
@@ -318,7 +478,7 @@ export async function moveTask(
       body: JSON.stringify({ version: task.version, status, sortOrder, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.task;
+  return retainWorktreePath(data.task, task);
 }
 
 export async function archiveTask(task: Task, threadId?: string): Promise<Task> {
@@ -329,7 +489,7 @@ export async function archiveTask(task: Task, threadId?: string): Promise<Task> 
       body: JSON.stringify({ version: task.version, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.task;
+  return retainWorktreePath(data.task, task);
 }
 
 export async function restoreTask(task: Task, threadId?: string): Promise<Task> {
@@ -340,7 +500,7 @@ export async function restoreTask(task: Task, threadId?: string): Promise<Task> 
       body: JSON.stringify({ version: task.version, ...(threadId ? { threadId } : {}) }),
     },
   );
-  return data.task;
+  return retainWorktreePath(data.task, task);
 }
 
 export async function addTaskRelation(
@@ -394,7 +554,7 @@ export async function createComment(
   taskId: string,
   body: string,
   threadId?: string,
-  mentions: Array<{ targetId: string }> = [],
+  mentions: Array<{ targetId: string; instruction: string }> = [],
 ): Promise<Comment> {
   const data = await request<{ comment: Comment }>(
     `/api/tasks/${encodeURIComponent(taskId)}/comments`,

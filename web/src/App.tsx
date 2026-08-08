@@ -35,6 +35,7 @@ import {
   removeTaskRelation,
   restoreTask as restoreTaskRequest,
   setCurrentUserActor,
+  setHostBridgeSession,
   uploadAttachment,
   updateTask as updateTaskRequest,
 } from "./api";
@@ -413,14 +414,15 @@ function isAutomationHostItem(value: unknown): value is AutomationHostItem {
   );
 }
 
-function isLocalTaskboardOrigin(origin: string): boolean {
-  try {
-    const { protocol, hostname } = new URL(origin);
-    return (protocol === "http:" || protocol === "https:")
-      && (hostname === "127.0.0.1" || hostname === "localhost");
-  } catch {
-    return false;
-  }
+function hasHostBridgeCapability(
+  hostContext: HostContext | null,
+  capability: NonNullable<HostContext["bridge"]>["capabilities"][number],
+): boolean {
+  return Boolean(
+    hostContext?.bridge?.protocolVersion === 1
+    && /^[0-9a-f-]{36}$/i.test(hostContext.bridge.sessionNonce)
+    && hostContext.bridge.capabilities.includes(capability),
+  );
 }
 
 function sortTasks(tasks: Task[]): Task[] {
@@ -647,8 +649,8 @@ export function App() {
     if (!embedded || window.parent === window) {
       return { unavailableReason: "仅可在 Codex App 中使用" };
     }
-    if (!isLocalTaskboardOrigin(window.location.origin)) {
-      return { unavailableReason: "仅本地任务面板可用" };
+    if (!hasHostBridgeCapability(hostContext, "automation")) {
+      return { unavailableReason: "Codex 本机桥未连接" };
     }
     if (!selectedProject) return { unavailableReason: "请先选择项目" };
 
@@ -677,7 +679,12 @@ export function App() {
     if (!iHaveAdhdSkill?.path) {
       return { unavailableReason: "本机未发现 i-have-adhd Skill" };
     }
-    return { workspacePath, codexProjectId, unavailableReason: null };
+    return {
+      workspacePath,
+      codexProjectId,
+      bridgeSessionNonce: hostContext!.bridge!.sessionNonce,
+      unavailableReason: null,
+    };
   }, [
     deviceWorkspacePaths,
     embedded,
@@ -797,6 +804,7 @@ export function App() {
       type: "taskboard:automation-request",
       payload: {
         requestId,
+        bridgeSessionNonce: automationProjectContext.bridgeSessionNonce,
         operation,
         taskboardProjectId: selectedProjectId,
         codexProjectId: automationProjectContext.codexProjectId,
@@ -1067,6 +1075,7 @@ export function App() {
 
       if (message.type !== "taskboard:host-context" || !message.payload) return;
       const payload = message.payload as HostContext;
+      setHostBridgeSession(payload.bridge?.sessionNonce);
       setHostContext(payload);
       setCurrentUserActor(payload.user);
       if (isTheme(payload.theme)) setTheme(payload.theme);
@@ -1080,6 +1089,7 @@ export function App() {
         window.clearTimeout(pending.timeoutId);
       }
       pendingAutomationRequestsRef.current.clear();
+      setHostBridgeSession();
     };
   }, [embedded]);
 
@@ -1153,7 +1163,7 @@ export function App() {
     const controller = new AbortController();
     void loadProjectList(controller.signal);
     return () => controller.abort();
-  }, [loadProjectList]);
+  }, [hostContext?.bridge?.sessionNonce, loadProjectList]);
 
   const refreshProjectList = useCallback(async () => {
     try {

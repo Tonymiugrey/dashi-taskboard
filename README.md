@@ -1,6 +1,6 @@
 # Codex Taskboard
 
-A local-first issue board that runs in a browser and can be embedded in Codex through the standalone CDP launcher or its injection script. The same HTTP API powers the React UI and the `taskctl` CLI used by the bundled Codex Skill.
+A Taskboard that can run locally or as one shared Cloudflare-hosted product and can be embedded in Codex through the standalone CDP launcher or its injection script. The same HTTP API powers the React UI and the `taskctl` CLI used by the bundled Codex Skill.
 
 ## Requirements
 
@@ -119,9 +119,29 @@ LAN mode has no account authentication: anyone on the trusted local network who 
 
 For two trusted collaborators, the taskboard can run on Cloudflare with Worker Static Assets and API routes, D1 as the authoritative business database, and a private R2 bucket for attachments. The deployment uses HTTPS Basic Authentication with a shared password and refreshes open boards after a global revision changes.
 
-Each device keeps its own project checkout mapping and continues to use a local companion for Codex, Git/worktree, Skill, and MCP capabilities. Cloud mode never falls back to or double-writes the local SQLite database.
+Each device keeps a lightweight loopback companion for Codex automation, Git/worktree, Skill/MCP discovery, native navigation, and device-specific project mappings. In cloud mode that process is bridge-only for the UI: it does not serve frontend assets or proxy iframe business traffic. The Codex iframe loads the same Worker URL as a browser, while a short-lived HttpOnly cloud session is installed by the trusted local launcher. `taskctl` still uses the companion as its authenticated CLI gateway. Cloud mode never falls back to or double-writes the local SQLite database.
+
+Frontend and business-API changes are built and deployed once by the owner. Other devices do not pull the frontend repository, rebuild it, or deploy their own copy; reopening Taskboard loads the current Cloudflare assets. Device-side code needs updating only when the small bridge protocol or Codex injection itself changes.
 
 See [Cloud collaboration](docs/cloud-collaboration.md) for owner deployment, existing GitHub installation setup, password rotation, local path mapping, and the one-time local-data migration flow.
+
+### Install the macOS device helper once
+
+After cloud login and project mapping, quit Codex completely and install the login helper:
+
+```bash
+npm run device-helper:install
+```
+
+It starts Codex with the required loopback-only debugging port at login, keeps the bridge resident while Codex is open, and writes logs to `~/Library/Logs/dashi-taskboard-helper.log`. Useful maintenance commands are:
+
+```bash
+npm run device-helper:status
+npm run device-helper:start
+npm run device-helper:uninstall
+```
+
+Installing the helper intentionally starts Codex. If Codex is later quit during the same login session, use `npm run device-helper:start` to reopen the managed instance; the agent does not force an app the user deliberately quit to relaunch continuously.
 
 ## Verify
 

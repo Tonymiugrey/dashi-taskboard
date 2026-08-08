@@ -10,7 +10,7 @@ function json(value, status = 200) {
   });
 }
 
-test("a targeted comment is sent verbatim to the issue's existing Codex conversation", async () => {
+test("a device assignment reuses only a matching local issue conversation", async () => {
   const trigger = {
     targetId: "codex-device-1",
     claimToken: "claim-1",
@@ -22,9 +22,11 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
     },
     comment: {
       id: "comment-1",
-      body: "把正文直接发到评论区，不要重新生成 summary。",
-      mentions: [{ targetId: "codex-device-1", status: "claimed" }],
+      body: "共享背景。",
+      mentions: [{ targetId: "codex-device-1", status: "claimed", instruction: "修改 API。" }],
     },
+    assignment: { targetId: "codex-device-1", instruction: "修改 API。" },
+    context: { checkpoints: [] },
   };
   const calls = [];
   let claimed = false;
@@ -53,7 +55,12 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
   const memoryCalls = [];
   const aiChat = {
     listThreads() {
-      return [];
+      return [{
+        id: "bridge-thread",
+        codexThreadId: "existing-codex-thread",
+        origin: { issueId: "task-1" },
+        status: "idle",
+      }];
     },
     async createResolvedThread(input) {
       aiCalls.push({ type: "create", input });
@@ -103,9 +110,9 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
   await dispatcher.tick();
   dispatcher.stop();
 
-  assert.equal(aiCalls.filter((call) => call.type === "create").length, 1);
-  assert.equal(aiCalls[0].input.codexThreadId, "existing-codex-thread");
-  assert.equal(aiCalls[1].input.message, trigger.comment.body);
+  assert.equal(aiCalls.filter((call) => call.type === "create").length, 0);
+  assert.match(aiCalls[0].input.message, /共享背景：\n共享背景。/);
+  assert.match(aiCalls[0].input.message, /你的设备任务：\n修改 API。/);
   assert.deepEqual(memoryCalls, [{
     trigger,
     status: "completed",
@@ -132,6 +139,13 @@ test("a targeted comment is sent verbatim to the issue's existing Codex conversa
       claimToken: "claim-1",
       status: "completed",
       threadId: "existing-codex-thread",
+      checkpoint: {
+        summary: "Finished",
+        changedFiles: [],
+        baseCommit: null,
+        resultCommit: null,
+        branch: null,
+      },
     },
   });
 });
@@ -147,6 +161,8 @@ test("a targeted comment starts a missing conversation with the ADHD skill", asy
       body: "继续处理这个返工。",
       mentions: [{ targetId: "codex-device-1", status: "claimed" }],
     },
+    assignment: { targetId: "codex-device-1", instruction: "只处理设备专属返工。" },
+    context: { checkpoints: [] },
   };
   let claimed = false;
   const turns = [];
@@ -197,7 +213,16 @@ test("a targeted comment starts a missing conversation with the ADHD skill", asy
   assert.deepEqual(turns, [{
     threadId: "bridge-thread-2",
     input: {
-      message: `\uFFFC${trigger.comment.body}`,
+        message: `\uFFFC共享背景：
+继续处理这个返工。
+
+你的设备任务：
+只处理设备专属返工。
+
+执行约束：先读取最新议题和全部评论；遵守前置阻塞及绑定的 branch/worktree。
+改代码前 fetch，并仅做安全 fast-forward；工作区 dirty/diverged 时停止并说明。
+完成验证后自动 commit、push 当前议题分支；最终回复只写改动、验证、结果和剩余风险。
+若本评论还有其他等待或执行中的设备任务，只记录自己的结果，不提前把整个议题移到 in_review。`,
       skillIds: ["i-have-adhd:i-have-adhd"],
     },
   }]);

@@ -149,6 +149,12 @@ async function localizeResponse(
   if (payload.task) {
     payload.task = await localizeTask(payload.task, resolveDevelopmentContext);
   }
+  if (payload.trigger?.task) {
+    payload.trigger.task = await localizeTask(
+      payload.trigger.task,
+      resolveDevelopmentContext,
+    );
+  }
   if (Array.isArray(payload.tasks)) {
     const contexts = new Map();
     const resolveOnce = resolveDevelopmentContext

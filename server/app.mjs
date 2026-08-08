@@ -1287,6 +1287,7 @@ export function resolveServerOptions(options = {}) {
       ?? path.join(dataDirectory, "codex-automation-policies.json"),
     automationsDirectory: options.automationsDirectory ?? path.join(codexHome, "automations"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
+    bridgeOnly: options.bridgeOnly ?? process.env.CODEX_TASKBOARD_BRIDGE_ONLY === "1",
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
     codexExecutable: options.codexExecutable
       ?? process.env.CODEX_EXECUTABLE
@@ -1435,6 +1436,31 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "PUT", "DELETE"]);
       }
 
+      if (pathname === "/api/local/cloud-browser-session") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Cloud browser session routes do not accept query parameters");
+        }
+        await assertEmptyRequestBody(request, "POST /api/local/cloud-browser-session");
+        const config = await cloudConfig.read();
+        if (!config.remoteUrl) {
+          throw new ApiError(409, "CLOUD_NOT_CONFIGURED", "Cloud collaboration is not configured");
+        }
+        const upstream = await cloudProxy.forward(new Request(
+          "http://127.0.0.1/api/auth/session",
+          { method: "POST" },
+        ));
+        const payload = await upstream.json().catch(() => ({}));
+        if (!upstream.ok) {
+          throw new ApiError(
+            upstream.status,
+            payload.error?.code ?? "CLOUD_SESSION_FAILED",
+            payload.error?.message ?? "Cloud browser session could not be created",
+          );
+        }
+        return sendJson(response, 200, payload);
+      }
+
       const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
       if (projectMappingRoute) {
         if (request.method !== "PUT") return methodNotAllowed(response, ["PUT"]);
@@ -1577,7 +1603,10 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/device-workspaces does not accept query parameters");
         }
         return sendJson(response, 200, {
-          workspaces: await readCodexProjectWorkspaces(resolved.codexStatePath),
+          workspaces: {
+            ...await readCodexProjectWorkspaces(resolved.codexStatePath),
+            ...(capabilityCloudConfig?.projectMappings ?? {}),
+          },
         });
       }
 
@@ -1597,6 +1626,20 @@ export function createTaskboardServer(options = {}) {
         }
         if (workspacePath && !path.isAbsolute(workspacePath)) {
           throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be absolute");
+        }
+        if (workspacePath && capabilityCloudConfig?.remoteUrl) {
+          const codexWorkspaces = await readCodexProjectWorkspaces(resolved.codexStatePath);
+          const allowedWorkspaces = new Set([
+            ...Object.values(codexWorkspaces),
+            ...Object.values(capabilityCloudConfig.projectMappings),
+          ].map((candidate) => path.resolve(candidate)));
+          if (!allowedWorkspaces.has(path.resolve(workspacePath))) {
+            throw new ApiError(
+              403,
+              "WORKSPACE_NOT_MAPPED",
+              "Cloud pages can inspect only workspaces mapped on this device",
+            );
+          }
         }
         return sendJson(
           response,
@@ -1699,6 +1742,20 @@ export function createTaskboardServer(options = {}) {
         );
         if (deviceWorkspacePath?.includes("\0")) {
           throw new ApiError(400, "INVALID_FIELD", "'workspacePath' cannot contain null bytes");
+        }
+        if (
+          currentCloudConfig.remoteUrl
+          && deviceWorkspacePath
+          && (
+            !project.workspacePath
+            || path.resolve(deviceWorkspacePath) !== path.resolve(project.workspacePath)
+          )
+        ) {
+          throw new ApiError(
+            403,
+            "WORKSPACE_NOT_MAPPED",
+            "Cloud projects can inspect only their mapped workspace on this device",
+          );
         }
         const workspacePath = deviceWorkspacePath ?? await resolveProjectWorkspace(
           project,
@@ -2051,6 +2108,9 @@ export function createTaskboardServer(options = {}) {
 
       if (pathname.startsWith("/api/")) {
         throw new ApiError(404, "NOT_FOUND", "API route not found");
+      }
+      if (resolved.bridgeOnly) {
+        throw new ApiError(404, "BRIDGE_ONLY", "The local Taskboard bridge does not serve frontend assets");
       }
       if (await serveStatic(request, response, pathname, resolved.staticDirectory)) return;
       throw new ApiError(404, "NOT_FOUND", "Resource not found");

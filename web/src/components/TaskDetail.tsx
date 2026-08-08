@@ -143,7 +143,7 @@ function contextValue(context: DevelopmentContext | null): string {
 
 function contextLabel(context: DevelopmentContext): string {
   if (context.type === "branch") return context.branch;
-  const folder = context.path.split(/[\\/]/).filter(Boolean).at(-1) ?? context.path;
+  const folder = context.path?.split(/[\\/]/).filter(Boolean).at(-1) ?? "未映射";
   return `${context.branch ?? "detached"} · ${folder}`;
 }
 
@@ -226,7 +226,10 @@ export function TaskDetail({
     ),
   );
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
-  const [pendingMentions, setPendingMentions] = useState<CodexTarget[]>([]);
+  const [pendingMentions, setPendingMentions] = useState<Array<{
+    target: CodexTarget;
+    instruction: string;
+  }>>([]);
   const [submitting, setSubmitting] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -418,16 +421,27 @@ export function TaskDetail({
 
   async function submitComment() {
     const body = draft.trim();
-    if ((!body && pendingCommentFiles.length === 0 && commentInlineImages.length === 0) || submitting) return;
+    if (
+      (
+        !body
+        && pendingCommentFiles.length === 0
+        && commentInlineImages.length === 0
+        && pendingMentions.length === 0
+      )
+      || pendingMentions.some((assignment) => !assignment.instruction.trim())
+      || submitting
+    ) return;
     setSubmitting(true);
     setCommentsError(null);
     try {
-      const activeMentions = pendingMentions.filter((target) => body.includes(`@${target.name}`));
       const comment = await createComment(
         task.id,
         body,
         undefined,
-        activeMentions.map((target) => ({ targetId: target.id })),
+        pendingMentions.map((assignment) => ({
+          targetId: assignment.target.id,
+          instruction: assignment.instruction.trim(),
+        })),
       );
       const [results, inlineAttachments] = await Promise.all([
         Promise.allSettled(
@@ -874,34 +888,31 @@ export function TaskDetail({
                         comment.body && <div className="comment-body"><DescriptionDocument value={comment.body} /></div>
                       )}
                       {(comment.mentions ?? []).length > 0 && (
-                        <div className="codex-mention-statuses" aria-label="Codex 触发状态">
+                        <div className="codex-assignment-list" aria-label="Codex 设备任务">
                           {(comment.mentions ?? []).map((mention) => (
-                            <span
-                              className={`codex-mention-status is-${mention.status ?? "recorded"}`}
+                            <article
+                              className={`codex-assignment is-${mention.status ?? "recorded"}`}
                               title={mention.error ?? undefined}
                               key={mention.targetId}
                             >
-                              <i />
-                              {mention.targetName}
-                              <small>{mention.status === "pending"
-                                ? "等待设备"
-                                : mention.status === "claimed"
-                                  ? "处理中"
-                                  : mention.status === "completed"
-                                    ? "已完成"
-                                    : mention.status === "failed"
-                                      ? "执行失败"
-                                      : "已提及"}</small>
-                            </span>
+                              <header>
+                                <span><i />{mention.targetName}</span>
+                                <small>{mention.status === "pending"
+                                  ? "等待设备"
+                                  : mention.status === "claimed"
+                                    ? "处理中"
+                                    : mention.status === "completed"
+                                      ? "已完成"
+                                      : mention.status === "failed"
+                                        ? "执行失败"
+                                        : "已分配"}</small>
+                              </header>
+                              {mention.instruction && <p>{mention.instruction}</p>}
+                              {mention.threadId && (
+                                <ConversationLink threadId={mention.threadId} onOpen={onOpenThread} />
+                              )}
+                            </article>
                           ))}
-                        </div>
-                      )}
-                      {(comment.mentions ?? []).find((mention) => mention.threadId)?.threadId && (
-                        <div className="codex-mention-conversation">
-                          <ConversationLink
-                            threadId={(comment.mentions ?? []).find((mention) => mention.threadId)!.threadId!}
-                            onOpen={onOpenThread}
-                          />
                         </div>
                       )}
                       {(comment.mentions ?? []).some((mention) => mention.status === "failed") && (
@@ -982,11 +993,45 @@ export function TaskDetail({
                   onKeyDown={handleSubmitShortcut}
                   mentionOptions={codexTargets}
                   onMention={(target) => setPendingMentions((current) => (
-                    current.some((candidate) => candidate.id === target.id)
+                    current.some((candidate) => candidate.target.id === target.id)
                       ? current
-                      : [...current, target]
+                      : [...current, { target, instruction: "" }]
                   ))}
                 />
+                {pendingMentions.length > 0 && (
+                  <div className="codex-assignment-drafts" aria-label="待分配设备任务">
+                    {pendingMentions.map((assignment) => (
+                      <label key={assignment.target.id}>
+                        <span>
+                          <i className={`codex-target-presence ${assignment.target.online ? "is-online" : ""}`} />
+                          <strong>{assignment.target.name}</strong>
+                          <small>{assignment.target.online ? "在线" : "离线，稍后处理"}</small>
+                          <button
+                            type="button"
+                            aria-label={`移除 ${assignment.target.name} 的任务`}
+                            onClick={() => setPendingMentions((current) => current.filter(
+                              (candidate) => candidate.target.id !== assignment.target.id,
+                            ))}
+                          >
+                            <LinearIcon name="close" />
+                          </button>
+                        </span>
+                        <textarea
+                          rows={2}
+                          value={assignment.instruction}
+                          placeholder={`输入给 ${assignment.target.name} 的任务…`}
+                          aria-label={`输入给 ${assignment.target.name} 的任务`}
+                          onChange={(event) => setPendingMentions((current) => current.map(
+                            (candidate) => candidate.target.id === assignment.target.id
+                              ? { ...candidate, instruction: event.target.value }
+                              : candidate,
+                          ))}
+                          onKeyDown={handleSubmitShortcut}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
                 <PendingAttachments
                   files={pendingCommentFiles}
                   disabled={submitting}
@@ -1037,7 +1082,8 @@ export function TaskDetail({
                         !draft.trim()
                         && pendingCommentFiles.length === 0
                         && commentInlineImages.length === 0
-                      ) || submitting}
+                        && pendingMentions.length === 0
+                      ) || pendingMentions.some((assignment) => !assignment.instruction.trim()) || submitting}
                     >
                       {submitting ? "发布中…" : "评论"}
                     </button>
@@ -1152,7 +1198,9 @@ export function TaskDetail({
               <select
                 value={contextValue(currentTask.developmentContext)}
                 disabled={developmentScanLoading || savingProperty === "developmentContext"}
-                title={currentTask.developmentContext?.type === "worktree" ? currentTask.developmentContext.path : undefined}
+                title={currentTask.developmentContext?.type === "worktree"
+                  ? currentTask.developmentContext.path ?? undefined
+                  : undefined}
                 onChange={(event) => void saveTask({
                   developmentContext: event.target.value ? JSON.parse(event.target.value) as DevelopmentContext : null,
                 }, "developmentContext")}

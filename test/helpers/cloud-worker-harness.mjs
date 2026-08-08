@@ -10,6 +10,7 @@ const ENTRY_PATH = path.join(PROJECT_ROOT, "cloud", "src", "index.mjs");
 const MIGRATION_PATHS = [
   path.join(PROJECT_ROOT, "cloud", "migrations", "0001_initial.sql"),
   path.join(PROJECT_ROOT, "cloud", "migrations", "0002_codex_mentions.sql"),
+  path.join(PROJECT_ROOT, "cloud", "migrations", "0003_codex_assignments.sql"),
 ];
 
 async function requireCloudImplementation() {
@@ -52,7 +53,15 @@ export async function createCloudWorkerHarness({
     await miniflare.ready;
     const db = await miniflare.getD1Database("DB");
     for (const migrationPath of MIGRATION_PATHS) {
-      await db.exec(await readFile(migrationPath, "utf8"));
+      const migration = await readFile(migrationPath, "utf8");
+      if (migration.includes("-- statement-breakpoint")) {
+        for (const statement of migration.split("-- statement-breakpoint")) {
+          const sql = statement.trim();
+          if (sql) await db.prepare(sql).run();
+        }
+      } else {
+        await db.exec(migration);
+      }
     }
     const attachments = await miniflare.getR2Bucket("ATTACHMENTS");
 

@@ -78,7 +78,8 @@ test("the project navigation automation menu owns the icon, fields, and accessib
   assert.match(appSource, /<ProjectAutomationMenu/);
   assert.match(appSource, /<ProjectAutomationMenu[\s\S]*?<button[\s\S]*?header-create-button/);
   assert.doesNotMatch(appSource, /toolbar-connection/);
-  assert.match(appSource, /仅本地任务面板可用/);
+  assert.match(appSource, /Codex 本机桥未连接/);
+  assert.match(appSource, /bridgeSessionNonce: automationProjectContext\.bridgeSessionNonce/);
 });
 
 test("automation status uses the verified Linear play and pause icon assets", () => {
