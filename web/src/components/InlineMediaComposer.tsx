@@ -357,6 +357,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
               value={segment.text}
               rows={1}
               disabled={disabled}
+              data-mention-menu-open={mentionMenu?.segmentId === segment.id ? "true" : undefined}
               aria-label={index === 0 ? ariaLabel : `${ariaLabel}续写`}
               placeholder={isEmpty && index === 0 ? placeholder : undefined}
               onChange={(event) => {

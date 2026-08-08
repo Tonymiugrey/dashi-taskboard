@@ -3967,6 +3967,20 @@ kbd {
   background: var(--surface-muted);
 }
 
+.codex-assignment-drafts > label {
+  transition: border-color 100ms ease, background 100ms ease, box-shadow 100ms ease;
+}
+
+.codex-assignment-drafts > label.is-delete-confirming {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-tertiary) 18%, transparent);
+}
+
+.codex-assignment-drafts > label.is-delete-confirming > span small {
+  color: var(--text-secondary);
+}
+
 .codex-assignment-drafts > label > span,
 .codex-assignment > header,
 .codex-assignment > header > span {

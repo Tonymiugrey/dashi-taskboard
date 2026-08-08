@@ -61,6 +61,7 @@ import {
   IssueSubIssues,
   type RelationMutationResult,
 } from "./IssueRelations";
+import { resolveAssignmentBackspace } from "../../../shared/assignment-delete-confirmation.mjs";
 
 const PRIORITY_DETAILS: Record<TaskPriority, { label: string; bars: number }> = {
   none: { label: "无优先级", bars: 0 },
@@ -230,6 +231,7 @@ export function TaskDetail({
     target: CodexTarget;
     instruction: string;
   }>>([]);
+  const [pendingMentionDeleteId, setPendingMentionDeleteId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -461,6 +463,7 @@ export function TaskDetail({
       setComments((current) => [...current, nextComment]);
       setCommentSegments(createInlineMediaSegments());
       setPendingMentions([]);
+      setPendingMentionDeleteId(null);
       setPendingCommentFiles([]);
       if (commentAttachmentInputRef.current) commentAttachmentInputRef.current.value = "";
       const failed = results.length - uploaded.length;
@@ -498,6 +501,61 @@ export function TaskDetail({
       event.preventDefault();
       void submitComment();
     }
+  }
+
+  function removePendingMention(targetId: string) {
+    setPendingMentions((current) => current.filter(
+      (candidate) => candidate.target.id !== targetId,
+    ));
+    setPendingMentionDeleteId(null);
+  }
+
+  function applyAssignmentBackspace(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+    targetId: string | null | undefined,
+    adjacent: boolean,
+  ): boolean {
+    const action = resolveAssignmentBackspace({
+      key: event.key,
+      repeat: event.repeat,
+      targetId,
+      armedTargetId: pendingMentionDeleteId,
+      selectionStart: event.currentTarget.selectionStart,
+      selectionEnd: event.currentTarget.selectionEnd,
+      adjacent,
+    });
+    if (action === "pass") return false;
+    event.preventDefault();
+    if (action === "delete" && targetId) removePendingMention(targetId);
+    else if (targetId) setPendingMentionDeleteId(targetId);
+    return true;
+  }
+
+  function handleCommentComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    const textareas = event.currentTarget.parentElement?.querySelectorAll(":scope > textarea");
+    const isLastTextSegment = Boolean(
+      textareas?.length && textareas.item(textareas.length - 1) === event.currentTarget,
+    );
+    const targetId = pendingMentions.at(-1)?.target.id;
+    const adjacent = Boolean(
+      isLastTextSegment
+      && event.currentTarget.dataset.mentionMenuOpen !== "true"
+      && event.currentTarget.selectionStart === event.currentTarget.value.length,
+    );
+    if (applyAssignmentBackspace(event, targetId, adjacent)) return;
+    if (pendingMentionDeleteId) setPendingMentionDeleteId(null);
+    handleSubmitShortcut(event);
+  }
+
+  function handleAssignmentKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+    targetId: string,
+  ) {
+    const adjacent = event.currentTarget.value.length === 0
+      && event.currentTarget.selectionStart === 0;
+    if (applyAssignmentBackspace(event, targetId, adjacent)) return;
+    if (pendingMentionDeleteId) setPendingMentionDeleteId(null);
+    handleSubmitShortcut(event);
   }
 
   function beginEdit(comment: Comment) {
@@ -973,7 +1031,24 @@ export function TaskDetail({
 
               {commentsError && <div className="comments-error" role="alert">{commentsError}</div>}
 
-              <form className="comment-composer" onSubmit={(event) => { event.preventDefault(); void submitComment(); }}>
+              <form
+                className="comment-composer"
+                onSubmit={(event) => { event.preventDefault(); void submitComment(); }}
+                onPointerDownCapture={(event) => {
+                  if (!pendingMentionDeleteId) return;
+                  const assignment = (event.target as HTMLElement).closest("[data-assignment-id]");
+                  if (assignment?.getAttribute("data-assignment-id") !== pendingMentionDeleteId) {
+                    setPendingMentionDeleteId(null);
+                  }
+                }}
+                onFocusCapture={(event) => {
+                  if (!pendingMentionDeleteId) return;
+                  const assignment = (event.target as HTMLElement).closest("[data-assignment-id]");
+                  if (assignment?.getAttribute("data-assignment-id") !== pendingMentionDeleteId) {
+                    setPendingMentionDeleteId(null);
+                  }
+                }}
+              >
                 <div className="composer-author">
                   <ActorAvatar
                     className="comment-avatar"
@@ -988,30 +1063,42 @@ export function TaskDetail({
                   segments={commentSegments}
                   placeholder="留下评论…"
                   ariaLabel="留下评论"
-                  onChange={setCommentSegments}
+                  onChange={(segments) => {
+                    setPendingMentionDeleteId(null);
+                    setCommentSegments(segments);
+                  }}
                   onError={setCommentsError}
-                  onKeyDown={handleSubmitShortcut}
+                  onKeyDown={handleCommentComposerKeyDown}
                   mentionOptions={codexTargets}
-                  onMention={(target) => setPendingMentions((current) => (
-                    current.some((candidate) => candidate.target.id === target.id)
-                      ? current
-                      : [...current, { target, instruction: "" }]
-                  ))}
+                  onMention={(target) => {
+                    setPendingMentionDeleteId(null);
+                    setPendingMentions((current) => (
+                      current.some((candidate) => candidate.target.id === target.id)
+                        ? current
+                        : [...current, { target, instruction: "" }]
+                    ));
+                  }}
                 />
                 {pendingMentions.length > 0 && (
                   <div className="codex-assignment-drafts" aria-label="待分配设备任务">
                     {pendingMentions.map((assignment) => (
-                      <label key={assignment.target.id}>
+                      <label
+                        key={assignment.target.id}
+                        data-assignment-id={assignment.target.id}
+                        className={pendingMentionDeleteId === assignment.target.id
+                          ? "is-delete-confirming"
+                          : undefined}
+                      >
                         <span>
                           <i className={`codex-target-presence ${assignment.target.online ? "is-online" : ""}`} />
                           <strong>{assignment.target.name}</strong>
-                          <small>{assignment.target.online ? "在线" : "离线，稍后处理"}</small>
+                          <small>{pendingMentionDeleteId === assignment.target.id
+                            ? "再次退格删除"
+                            : assignment.target.online ? "在线" : "离线，稍后处理"}</small>
                           <button
                             type="button"
                             aria-label={`移除 ${assignment.target.name} 的任务`}
-                            onClick={() => setPendingMentions((current) => current.filter(
-                              (candidate) => candidate.target.id !== assignment.target.id,
-                            ))}
+                            onClick={() => removePendingMention(assignment.target.id)}
                           >
                             <LinearIcon name="close" />
                           </button>
@@ -1021,12 +1108,20 @@ export function TaskDetail({
                           value={assignment.instruction}
                           placeholder={`输入给 ${assignment.target.name} 的任务…`}
                           aria-label={`输入给 ${assignment.target.name} 的任务`}
-                          onChange={(event) => setPendingMentions((current) => current.map(
-                            (candidate) => candidate.target.id === assignment.target.id
-                              ? { ...candidate, instruction: event.target.value }
-                              : candidate,
-                          ))}
-                          onKeyDown={handleSubmitShortcut}
+                          onChange={(event) => {
+                            setPendingMentionDeleteId(null);
+                            setPendingMentions((current) => current.map(
+                              (candidate) => candidate.target.id === assignment.target.id
+                                ? { ...candidate, instruction: event.target.value }
+                                : candidate,
+                            ));
+                          }}
+                          onKeyDown={(event) => handleAssignmentKeyDown(event, assignment.target.id)}
+                          onBlur={(event) => {
+                            if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) {
+                              setPendingMentionDeleteId(null);
+                            }
+                          }}
                         />
                       </label>
                     ))}
