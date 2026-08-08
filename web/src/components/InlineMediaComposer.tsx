@@ -12,6 +12,7 @@ import type { Attachment } from "../types";
 import type { CodexTarget } from "../types";
 import { attachmentContentUrl } from "../api";
 import { resolveAssignmentBackspace } from "../../../shared/assignment-delete-confirmation.mjs";
+import { resolveComposerArrowBoundary } from "../../../shared/composer-arrow-navigation.mjs";
 import { clipboardImages, fileKey, MAX_ATTACHMENT_SIZE } from "./PendingAttachments";
 import { LinearIcon } from "./LinearIcon";
 
@@ -355,6 +356,36 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       return true;
     }
 
+    function moveAcrossSegmentBoundary(
+      event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>,
+      segmentIndex: number,
+    ): boolean {
+      const action = resolveComposerArrowBoundary({
+        key: event.key,
+        selectionStart: event.currentTarget.selectionStart,
+        selectionEnd: event.currentTarget.selectionEnd,
+        valueLength: event.currentTarget.value.length,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+      });
+      if (action === "pass") return false;
+      const destination = segments[segmentIndex + (action === "previous" ? -1 : 1)];
+      const element = destination?.type === "text"
+        ? textareas.current.get(destination.id)
+        : destination?.type === "codex-assignment"
+          ? assignmentInputs.current.get(destination.id)
+          : null;
+      if (!element) return false;
+      event.preventDefault();
+      onArmedAssignmentChange?.(null);
+      element.focus();
+      const offset = action === "previous" ? element.value.length : 0;
+      element.setSelectionRange(offset, offset);
+      return true;
+    }
+
     function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>, segmentIndex: number) {
       if (mentionMenu && filteredMentions.length > 0) {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -389,6 +420,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
           event.currentTarget.selectionStart === 0,
         )
       ) return;
+      if (moveAcrossSegmentBoundary(event, segmentIndex)) return;
       if (armedAssignmentId) onArmedAssignmentChange?.(null);
       onKeyDown?.(event);
     }
@@ -396,6 +428,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     function handleAssignmentKeyDown(
       event: KeyboardEvent<HTMLInputElement>,
       assignment: InlineAssignmentSegment,
+      segmentIndex: number,
     ) {
       if (applyAssignmentBackspace(
         event,
@@ -403,6 +436,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         assignment.id,
         assignment.instruction.length === 0 && event.currentTarget.selectionStart === 0,
       )) return;
+      if (moveAcrossSegmentBoundary(event, segmentIndex)) return;
       if (armedAssignmentId) onArmedAssignmentChange?.(null);
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         onKeyDown?.(event as unknown as KeyboardEvent<HTMLTextAreaElement>);
@@ -529,7 +563,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
                     ? { ...segment, instruction: event.target.value }
                     : candidate));
                 }}
-                onKeyDown={(event) => handleAssignmentKeyDown(event, segment)}
+                onKeyDown={(event) => handleAssignmentKeyDown(event, segment, index)}
                 onSelect={() => {
                   if (armedAssignmentId) onArmedAssignmentChange?.(null);
                 }}
