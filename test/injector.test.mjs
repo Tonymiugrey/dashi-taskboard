@@ -90,6 +90,8 @@ test("the injector ignores auxiliary Codex windows", () => {
 
 test("a completed web build refreshes an already-open Codex iframe", () => {
   assert.match(packageJson.scripts.build, /--refresh-if-running/);
+  assert.match(packageJson.scripts["cloud:deploy"], /--refresh-frames-if-running/);
+  assert.doesNotMatch(packageJson.scripts["cloud:deploy"], /--refresh-if-running/);
   assert.match(packageJson.scripts["codex:refresh"], /--refresh/);
   assert.match(source, /async function refreshTaskboardFrames/);
   assert.match(source, /function codexDebuggingPorts/);
@@ -97,6 +99,7 @@ test("a completed web build refreshes an already-open Codex iframe", () => {
   assert.match(source, /taskboard\.reloadFrame\(\)/);
   assert.match(source, /__codex_taskboard_refresh/);
   assert.match(source, /await restartResidentInjectorForRefresh\(port\)/);
+  assert.match(source, /options\.refreshIfRunning \|\| options\.refreshFramesIfRunning/);
 });
 
 test("the injected iframe loads the cloud origin while the local process stays bridge-only", () => {

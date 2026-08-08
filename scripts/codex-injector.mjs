@@ -58,6 +58,7 @@ function parseArgs(argv) {
     open: false,
     refresh: false,
     refreshIfRunning: false,
+    refreshFramesIfRunning: false,
     attachExisting: false,
     startupToken: null,
     daemon: false,
@@ -72,6 +73,7 @@ function parseArgs(argv) {
     else if (arg === "--open") options.open = true;
     else if (arg === "--refresh") options.refresh = true;
     else if (arg === "--refresh-if-running") options.refreshIfRunning = true;
+    else if (arg === "--refresh-frames-if-running") options.refreshFramesIfRunning = true;
     else if (arg === "--attach-existing") options.attachExisting = true;
     else if (arg === "--startup-token") {
       options.startupToken = argv[++index];
@@ -1327,7 +1329,7 @@ async function main() {
     return;
   }
 
-  if (options.refresh || options.refreshIfRunning) {
+  if (options.refresh || options.refreshIfRunning || options.refreshFramesIfRunning) {
     const ports = options.portExplicit
       ? [options.port]
       : codexDebuggingPorts(options.port);
@@ -1339,7 +1341,7 @@ async function main() {
       refreshed.push(...results.map((result) => ({ port, ...result })));
     }
     if (refreshed.length === 0) {
-      if (options.refreshIfRunning) {
+      if (options.refreshIfRunning || options.refreshFramesIfRunning) {
         console.log(JSON.stringify({ refreshed: [], skipped: "No debuggable Codex window is running" }));
         return;
       }

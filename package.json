@@ -32,7 +32,7 @@
     "cloud:migrate:local": "wrangler d1 migrations apply codex-taskboard-db --local",
     "cloud:migrate": "wrangler d1 migrations apply codex-taskboard-db --remote",
     "cloud:deploy:dry-run": "npm run build:web && wrangler deploy --dry-run",
-    "cloud:deploy": "npm run build:web && wrangler deploy && node scripts/codex-injector.mjs --refresh-if-running",
+    "cloud:deploy": "npm run build:web && wrangler deploy && node scripts/codex-injector.mjs --refresh-frames-if-running",
     "cloud:data": "node scripts/migrate-to-cloud.mjs",
     "check": "npm run typecheck && npm run build && npm test"
   },
