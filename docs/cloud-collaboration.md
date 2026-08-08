@@ -130,13 +130,13 @@ For a first manual check, start the managed Codex instance:
 CODEX_TASKBOARD_HOST=127.0.0.1 npm run codex
 ```
 
-After the manual check, quit Codex and install the macOS login helper once:
+After the manual check, install the macOS device helper once:
 
 ```bash
 npm run device-helper:install
 ```
 
-The helper starts Codex at login with a loopback-only CDP port and keeps the bridge resident while Codex is open. It does not continuously reopen Codex after the user deliberately quits; use `npm run device-helper:start` when a managed restart is needed in the same login session.
+The helper's lightweight watcher starts at login, but Codex does not. When the user launches Codex from its normal icon, the watcher reopens that launch once with a loopback-only CDP port, injects Taskboard, and keeps the bridge resident only while Codex is open. `Cmd+Q` leaves the app closed. Installing or restarting the helper also does not open Codex; if Codex was already open without CDP during installation, quit and reopen it once.
 
 The Codex iframe points directly at the deployed Worker. The companion supplies only local Codex/Git/Skill/MCP capabilities and a signed browser session; it does not proxy board data, serve a frontend build, write the shared password to D1/R2, return that password to renderer code, or print it in logs. Device paths also stay off Cloudflare.
 

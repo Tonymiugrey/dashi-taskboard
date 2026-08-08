@@ -23,7 +23,7 @@ function xml(value) {
 }
 
 function plist() {
-  const injector = path.join(projectRoot, "scripts", "codex-injector.mjs");
+  const daemon = path.join(projectRoot, "scripts", "device-helper-daemon.mjs");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -33,9 +33,7 @@ function plist() {
   <key>ProgramArguments</key>
   <array>
     <string>${xml(process.execPath)}</string>
-    <string>${xml(injector)}</string>
-    <string>--launch</string>
-    <string>--watch</string>
+    <string>${xml(daemon)}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${xml(projectRoot)}</string>
@@ -47,12 +45,11 @@ function plist() {
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
   <key>ProcessType</key>
-  <string>Interactive</string>
+  <string>Background</string>
   <key>StandardOutPath</key>
   <string>${xml(logPath)}</string>
   <key>StandardErrorPath</key>
@@ -63,9 +60,10 @@ function plist() {
 }
 
 function launchctl(args, { allowFailure = false, capture = false } = {}) {
+  const shouldCapture = capture || allowFailure;
   const result = spawnSync("/bin/launchctl", args, {
-    encoding: capture ? "utf8" : undefined,
-    stdio: capture ? "pipe" : "inherit",
+    encoding: shouldCapture ? "utf8" : undefined,
+    stdio: shouldCapture ? "pipe" : "inherit",
   });
   if (!allowFailure && result.status !== 0) {
     throw new Error(`launchctl ${args[0]} failed with exit code ${result.status}`);
@@ -81,7 +79,8 @@ async function install() {
   await writeFile(agentPath, plist(), { mode: 0o644 });
   await chmod(agentPath, 0o644);
   launchctl(["bootstrap", domain, agentPath]);
-  console.log(`Installed ${LABEL}. Codex and the Taskboard bridge will start at login.`);
+  console.log(`Installed ${LABEL}. The watcher starts at login, but Codex opens only when you start it.`);
+  console.log("If Codex is already open without a debugging port, quit and reopen it once.");
   console.log(`LaunchAgent: ${agentPath}`);
 }
 
@@ -95,6 +94,7 @@ async function uninstall() {
 
 function start() {
   launchctl(["kickstart", "-k", `${domain}/${LABEL}`]);
+  console.log("Taskboard watcher restarted. Codex was not opened.");
 }
 
 async function status() {

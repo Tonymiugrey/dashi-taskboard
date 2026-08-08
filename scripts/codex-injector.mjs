@@ -139,6 +139,17 @@ async function waitUntilReachable(url, timeoutMs) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
+async function waitForCodexTargets(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if ((await codexTargets(port)).length > 0) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for a Codex renderer on 127.0.0.1:${port}`);
+}
+
 function startTaskboard({ detached }) {
   let bridgeOnly = false;
   try {
@@ -1360,6 +1371,7 @@ async function main() {
       codexProcess = launchCodex(options.appPath, options.port);
       await waitUntilReachable(cdpVersionUrl, 30_000);
     }
+    await waitForCodexTargets(options.port, 30_000);
 
     const { source, sourceHash, browserSession } = await currentInjectionSource();
     let activeBrowserSession = browserSession;

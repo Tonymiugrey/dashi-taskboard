@@ -127,13 +127,13 @@ See [Cloud collaboration](docs/cloud-collaboration.md) for owner deployment, exi
 
 ### Install the macOS device helper once
 
-After cloud login and project mapping, quit Codex completely and install the login helper:
+After cloud login and project mapping, install the device helper:
 
 ```bash
 npm run device-helper:install
 ```
 
-It starts Codex with the required loopback-only debugging port at login, keeps the bridge resident while Codex is open, and writes logs to `~/Library/Logs/dashi-taskboard-helper.log`. Useful maintenance commands are:
+It installs a lightweight watcher that starts at login but does not start Codex. When you launch Codex normally from its existing icon, the watcher reopens that launch once with the required loopback-only debugging port, injects the Taskboard entry, and keeps the bridge resident only while Codex is open. `Cmd+Q` leaves Codex closed. Logs are written to `~/Library/Logs/dashi-taskboard-helper.log`. Useful maintenance commands are:
 
 ```bash
 npm run device-helper:status
@@ -141,7 +141,7 @@ npm run device-helper:start
 npm run device-helper:uninstall
 ```
 
-Installing the helper intentionally starts Codex. If Codex is later quit during the same login session, use `npm run device-helper:start` to reopen the managed instance; the agent does not force an app the user deliberately quit to relaunch continuously.
+Installing or restarting the helper never opens Codex. If Codex was already open without a debugging port during installation, quit and reopen it once; subsequent normal launches get the Taskboard entry automatically.
 
 ## Verify
 

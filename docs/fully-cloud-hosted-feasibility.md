@@ -44,7 +44,7 @@
 
 当前启动器需要连接 CDP、开启 CSP bypass、注册 document-start 脚本、重载 renderer、挂载菜单和 iframe，并维持 host binding 心跳。把 iframe 指向云端能删除“本地提供前端和代理业务 API”的职责，但不会删除这些宿主集成步骤。
 
-OpenAI 当前公开的插件能力主要是 Skill、MCP 工具和可选 UI；官方 UI 文档明确以 ChatGPT/MCP Apps 宿主为主，并建议在不渲染组件的 Codex 等客户端保持工具可用。公开文档没有提供向现有 Codex 桌面侧边栏注册常驻自定义页面的接口。因此，插件可以承载 Taskboard 工具和工作流，但目前不能可靠替代这套侧边栏注入。来源：[Plugin architecture](https://developers.openai.com/plugins/concepts/plugins)、[Add UI to your MCP server](https://developers.openai.com/plugins/build/chatgpt-ui)、[Codex App Server](https://learn.chatgpt.com/docs/app-server)。
+OpenAI 当前公开的通用插件能力主要是 Skill、connector/MCP、hook 和工具返回的可选 UI；公开 manifest 没有提供向 Codex 桌面侧边栏注册常驻页面的接口。官方文档确实展示了固定在侧边栏的 Security workbench，但它只作为 Codex Security 的专用能力公开。因此，普通插件可以承载 Taskboard 工具和工作流，目前不能可靠替代这套侧边栏注入。来源：[Plugins](https://learn.chatgpt.com/docs/plugins)、[Build plugins](https://developers.openai.com/plugins/build/plugins)、[Codex Security workbench](https://learn.chatgpt.com/docs/security/plugin/workbench)。
 
 ## 推荐目标架构
 
@@ -83,7 +83,7 @@ OpenAI 当前公开的插件能力主要是 Skill、MCP 工具和可选 UI；官
 2. **可信能力桥**：把 localhost 判断替换为 origin + nonce + 能力握手；自动化、余量、对话和 Git 操作继续走本机桥。
 3. **项目双视图**：云端项目与本机工作区分组展示，增加设备级映射；不合并两套议题库。
 4. **缩小设备端**：本机 companion 不再提供前端、不再代理普通业务 API，只保留 loopback capability API、设备心跳和 Codex host binding。
-5. **简化启动**：把启动器做成一次安装、登录时自动启动的设备助手；保留稳定的小型注入脚本。只有桥协议或 Codex DOM 变化时更新设备端。
+5. **简化启动**：把启动器做成一次安装的设备助手。登录时只启动轻量 watcher，不启动 Codex；用户主动打开 Codex 后再附着注入与本机桥，`Cmd+Q` 后保持退出。只有桥协议或 Codex DOM 变化时更新设备端。
 
 第一阶段完成后，多设备不再需要为普通产品更新拉代码或各自部署；第四、五阶段完成后，用户日常只打开 Codex，不再手动运行多条命令。
 

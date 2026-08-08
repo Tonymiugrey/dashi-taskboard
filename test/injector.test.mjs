@@ -18,6 +18,8 @@ test("the resident injector supervises the fixed local Taskboard service", () =>
   assert.match(source, /await supervisor\.ensure\(\)/);
   assert.match(source, /it will be restarted automatically/);
   assert.match(source, /AbortSignal\.timeout\(1_500\)/);
+  assert.match(source, /async function waitForCodexTargets/);
+  assert.match(source, /await waitForCodexTargets\(options\.port, 30_000\)/);
 });
 
 test("the CDP bridge accepts only service ensure and native Skill composer prefill actions", () => {
