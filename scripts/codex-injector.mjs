@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { resolvePort } from "../server/app.mjs";
+import { buildMentionAssignmentMessage } from "../server/codex-mention-dispatcher.mjs";
 import {
   parseTaskboardAutomationHostRequest,
   reconcileTaskboardAutomation,
@@ -28,6 +29,7 @@ const defaultCodexDebuggingPort = 9229;
 const injectionPath = path.join(projectRoot, "inject", "codex-taskboard.user.js");
 const automationPoliciesPath = path.join(projectRoot, ".data", "codex-automation-policies.json");
 const cloudConfigPath = path.join(projectRoot, ".data", "cloud-companion.json");
+const desktopMentionThreadsPath = path.join(projectRoot, ".data", "codex-desktop-mention-threads.json");
 const taskboardOrigin = `http://127.0.0.1:${resolvePort()}`;
 const taskboardHealthUrl = `${taskboardOrigin}/health`;
 const localTaskboardPageUrl = `${taskboardOrigin}/?host=codex`;
@@ -51,6 +53,10 @@ let quotaPoliciesWritePromise = Promise.resolve();
 let quotaPoliciesRestored = false;
 let remoteAutomationTimer = null;
 let remoteAutomationSyncing = false;
+let mentionDeliveryTimer = null;
+let mentionDeliveryRunning = false;
+let mentionHeartbeatAt = 0;
+let desktopMentionThreadsWrite = Promise.resolve();
 
 function parseArgs(argv) {
   const options = {
@@ -559,10 +565,7 @@ async function waitForFrame(cdp, expectedUrl, timeoutMs) {
   return false;
 }
 
-async function requestCodexAutomationViaCdp(cdp, executionContextId, method, params) {
-  if (!codexAutomationMethods.has(method)) {
-    throw new Error(`Unsupported Codex automation method: ${method}`);
-  }
+async function requestCodexHostViaCdp(cdp, executionContextId, method, params) {
   const requestId = [
     "taskboard-automation",
     process.pid,
@@ -576,7 +579,7 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
       const requestId = ${JSON.stringify(requestId)};
       const bridge = window.electronBridge;
       if (!bridge || typeof bridge.sendMessageFromView !== "function") {
-        resolve({ ok: false, error: "当前 Codex 版本没有提供原生自动任务能力" });
+        resolve({ ok: false, error: "当前 Codex 版本没有提供原生 Desktop 能力" });
         return;
       }
       let settled = false;
@@ -603,7 +606,7 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
         });
       };
       const timeout = window.setTimeout(
-        () => finish({ ok: false, error: "Codex 自动任务接口没有响应" }),
+        () => finish({ ok: false, error: "Codex Desktop 接口没有响应" }),
         10_000,
       );
       window.addEventListener("message", onMessage);
@@ -627,13 +630,13 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
   if (evaluation.exceptionDetails) {
     throw new Error(
       evaluation.exceptionDetails.exception?.description
-      || "Codex automation request failed",
+      || "Codex Desktop request failed",
     );
   }
   const response = evaluation.result.value;
-  if (!response?.ok) throw new Error(response?.error || "Codex automation request failed");
+  if (!response?.ok) throw new Error(response?.error || "Codex Desktop request failed");
   if (!Number.isInteger(response.status) || response.status < 200 || response.status >= 300) {
-    throw new Error(`Codex automation request returned HTTP ${response.status}`);
+    throw new Error(`Codex Desktop request returned HTTP ${response.status}`);
   }
   if (typeof response.bodyJsonString !== "string" || response.bodyJsonString.length === 0) {
     return {};
@@ -641,8 +644,15 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
   try {
     return JSON.parse(response.bodyJsonString);
   } catch {
-    throw new Error("Codex automation request returned invalid JSON");
+    throw new Error("Codex Desktop request returned invalid JSON");
   }
+}
+
+async function requestCodexAutomationViaCdp(cdp, executionContextId, method, params) {
+  if (!codexAutomationMethods.has(method)) {
+    throw new Error(`Unsupported Codex automation method: ${method}`);
+  }
+  return requestCodexHostViaCdp(cdp, executionContextId, method, params);
 }
 
 async function applyTaskboardAutomationPolicy(request, rpc, stillCurrent = () => true) {
@@ -1068,6 +1078,317 @@ async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {
   throw new Error("Timed out while writing the issue instruction into the Codex composer");
 }
 
+function emptyDesktopMentionThreads() {
+  return { version: 1, devices: {} };
+}
+
+async function readDesktopMentionThreads() {
+  try {
+    const value = JSON.parse(await readFile(desktopMentionThreadsPath, "utf8"));
+    if (value?.version !== 1 || value.devices === null || typeof value.devices !== "object") {
+      return emptyDesktopMentionThreads();
+    }
+    return value;
+  } catch {
+    return emptyDesktopMentionThreads();
+  }
+}
+
+async function readDesktopMentionThread(deviceTargetId, taskId) {
+  const state = await readDesktopMentionThreads();
+  const threadId = state.devices?.[deviceTargetId]?.[taskId];
+  return typeof threadId === "string" && threadId.trim() ? threadId.trim() : null;
+}
+
+async function writeDesktopMentionThread(deviceTargetId, taskId, threadId) {
+  const operation = desktopMentionThreadsWrite.catch(() => {}).then(async () => {
+    const state = await readDesktopMentionThreads();
+    const devices = state.devices && typeof state.devices === "object" ? state.devices : {};
+    const deviceThreads = devices[deviceTargetId] && typeof devices[deviceTargetId] === "object"
+      ? devices[deviceTargetId]
+      : {};
+    await mkdir(path.dirname(desktopMentionThreadsPath), { recursive: true });
+    await writeFile(desktopMentionThreadsPath, `${JSON.stringify({
+      version: 1,
+      devices: {
+        ...devices,
+        [deviceTargetId]: { ...deviceThreads, [taskId]: threadId },
+      },
+    }, null, 2)}\n`, { mode: 0o600 });
+  });
+  desktopMentionThreadsWrite = operation;
+  await operation;
+}
+
+function normalizeDesktopThreadId(value) {
+  const threadId = typeof value === "string"
+    ? value.trim().replace(/^(?:local|cloud):/i, "")
+    : "";
+  return threadId || null;
+}
+
+async function readActiveDesktopThreadId(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const normalize = (value) => String(value || "").trim().replace(/^(?:local|cloud):/i, "");
+      const rows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
+      const active = rows.find((row) => (
+        row.getAttribute("data-app-action-sidebar-thread-active") === "true"
+        || ["page", "true"].includes(row.getAttribute("aria-current"))
+      ));
+      const rowId = normalize(active?.getAttribute("data-app-action-sidebar-thread-id"));
+      if (rowId) return rowId;
+      const source = String(window.location.pathname || "")
+        + String(window.location.search || "")
+        + String(window.location.hash || "");
+      const match = source.match(/(?:session|conversation|thread)(?:\\/|=|:|-)([A-Za-z0-9_.-]+)/i)
+        || source.match(/\\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:[/?#]|$)/)
+        || source.match(/\\/([A-Za-z0-9_-]{24,})(?:[/?#]|$)/);
+      return match ? normalize(decodeURIComponent(match[1])) : null;
+    })()`,
+    returnByValue: true,
+  });
+  return normalizeDesktopThreadId(result.result.value);
+}
+
+async function desktopSidebarHasThread(cdp, threadId) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const expected = ${JSON.stringify(threadId)}.replace(/^(?:local|cloud):/i, "");
+      return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"))
+        .some((row) => String(row.getAttribute("data-app-action-sidebar-thread-id") || "")
+          .trim().replace(/^(?:local|cloud):/i, "") === expected);
+    })()`,
+    returnByValue: true,
+  });
+  return result.result.value === true;
+}
+
+async function navigateDesktop(cdp, route) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      window.__codexTaskboardInjection__?.close?.();
+      window.postMessage({
+        type: "navigate-to-route",
+        path: ${JSON.stringify(route)},
+        state: { focusComposerNonce: Date.now() },
+      }, window.location.origin);
+      return true;
+    })()`,
+    returnByValue: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.exception?.description || "Codex Desktop navigation failed");
+  }
+}
+
+async function waitForDesktopComposer(cdp, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await cdp.send("Runtime.evaluate", {
+      expression: `Boolean(Array.from(document.querySelectorAll(
+        '[data-codex-composer="true"][contenteditable="true"]'
+      )).find((candidate) => candidate.getClientRects().length > 0))`,
+      returnByValue: true,
+    });
+    if (result.result.value === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  throw new Error("Codex Desktop conversation composer did not become available");
+}
+
+async function openDesktopThread(cdp, threadId) {
+  await navigateDesktop(cdp, `/local/${encodeURIComponent(threadId)}`);
+  await waitForDesktopComposer(cdp);
+}
+
+async function openNewDesktopThread(cdp, workspacePath, projectName) {
+  await requestCodexHostViaCdp(cdp, undefined, "add-workspace-root-option", {
+    root: workspacePath,
+    label: path.basename(workspacePath) || projectName,
+    setActive: true,
+  });
+  await navigateDesktop(cdp, "/");
+  await waitForDesktopComposer(cdp);
+}
+
+async function submitDesktopComposer(cdp, instruction, existingThreadId) {
+  const submitted = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const editor = Array.from(document.querySelectorAll(
+        '[data-codex-composer="true"][contenteditable="true"]'
+      )).find((candidate) => candidate.getClientRects().length > 0);
+      const root = editor?.closest('[data-codex-composer-root]');
+      if (!editor || !root) return { submitted: false, labels: [] };
+      const buttons = Array.from(root.querySelectorAll("button:not(:disabled)"));
+      const labels = buttons.map((button) => String(
+        button.getAttribute("aria-label") || button.getAttribute("title") || button.textContent || ""
+      ).replace(/\\s+/g, " ").trim()).filter(Boolean);
+      const submit = buttons.find((button) => {
+        const label = String(
+          button.getAttribute("aria-label") || button.getAttribute("title") || button.textContent || ""
+        ).replace(/\\s+/g, " ").trim();
+        return /^(?:send|发送|提交|steer|引导|queue|排队)$/i.test(label)
+          || button.getAttribute("type") === "submit";
+      });
+      if (!submit) return { submitted: false, labels };
+      submit.click();
+      return { submitted: true, labels };
+    })()`,
+    returnByValue: true,
+  });
+  if (submitted.result.value?.submitted !== true) {
+    const labels = submitted.result.value?.labels?.join(", ") || "none";
+    throw new Error(`Codex Desktop send button was not available (buttons: ${labels})`);
+  }
+
+  const deadline = Date.now() + 20_000;
+  let threadId = normalizeDesktopThreadId(existingThreadId);
+  while (Date.now() < deadline) {
+    const accepted = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const instruction = ${JSON.stringify(instruction)};
+        const editor = Array.from(document.querySelectorAll(
+          '[data-codex-composer="true"][contenteditable="true"]'
+        )).find((candidate) => candidate.getClientRects().length > 0);
+        return !editor || !(editor.textContent || "").includes(instruction);
+      })()`,
+      returnByValue: true,
+    });
+    threadId = await readActiveDesktopThreadId(cdp) ?? threadId;
+    if (accepted.result.value === true && threadId) return threadId;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Codex Desktop did not accept the comment message");
+}
+
+async function deliverMentionToDesktop(cdp, config, trigger) {
+  const workspacePath = trigger.task?.developmentContext?.type === "worktree"
+    && trigger.task.developmentContext.path
+    ? trigger.task.developmentContext.path
+    : config.projectMappings?.[trigger.project?.id];
+  if (!workspacePath) {
+    throw new Error(`Project '${trigger.project?.id ?? "unknown"}' is not mapped on this device`);
+  }
+
+  const metadata = await fetchJson(`${taskboardOrigin}/api/meta`);
+  if (!metadata.manageTaskboardSkillPath || !metadata.iHaveAdhdSkill?.path) {
+    throw new Error("Codex Desktop cannot resolve the required taskboard skills");
+  }
+  const skills = [
+    {
+      name: "manage-taskboard",
+      displayName: "Manage Taskboard",
+      path: metadata.manageTaskboardSkillPath,
+    },
+    {
+      name: "i-have-adhd:i-have-adhd",
+      displayName: metadata.iHaveAdhdSkill.label || "I Have ADHD",
+      path: metadata.iHaveAdhdSkill.path,
+    },
+  ];
+
+  let threadId = await readDesktopMentionThread(config.deviceTarget.id, trigger.task.id);
+  if (!threadId) {
+    const issueThreadId = normalizeDesktopThreadId(trigger.task.threadId);
+    if (issueThreadId && await desktopSidebarHasThread(cdp, issueThreadId)) {
+      threadId = issueThreadId;
+    }
+  }
+
+  if (threadId) {
+    try {
+      await openDesktopThread(cdp, threadId);
+    } catch {
+      threadId = null;
+    }
+  }
+  if (!threadId) {
+    await openNewDesktopThread(cdp, workspacePath, trigger.project?.name || trigger.task.identifier);
+  }
+
+  const instruction = buildMentionAssignmentMessage(trigger);
+  await prefillTaskComposerViaCdp(cdp, undefined, { instruction, skills });
+  const acceptedThreadId = await submitDesktopComposer(cdp, instruction, threadId);
+  await writeDesktopMentionThread(config.deviceTarget.id, trigger.task.id, acceptedThreadId);
+  return acceptedThreadId;
+}
+
+async function finishRemoteMention(trigger, result) {
+  return fetchJson(
+    `${taskboardOrigin}/api/codex-triggers/${encodeURIComponent(trigger.comment.id)}`
+      + `/${encodeURIComponent(trigger.targetId || "")}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claimToken: trigger.claimToken, ...result }),
+    },
+  );
+}
+
+async function syncRemoteMentionDelivery(cdp) {
+  if (mentionDeliveryRunning) return;
+  mentionDeliveryRunning = true;
+  try {
+    let config;
+    try {
+      config = JSON.parse(await readFile(cloudConfigPath, "utf8"));
+    } catch {
+      return;
+    }
+    if (!config?.remoteUrl || !config.actorName) return;
+    if (!config.deviceTarget?.id) {
+      const { target } = await fetchJson(`${taskboardOrigin}/api/local/codex-target`, {
+        method: "POST",
+      });
+      config = { ...config, deviceTarget: target };
+    }
+    if (!config.deviceTarget?.id) return;
+
+    if (Date.now() - mentionHeartbeatAt >= 15_000) {
+      await fetchJson(`${taskboardOrigin}/api/codex-targets/heartbeat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: config.deviceTarget.id,
+          name: config.deviceTarget.name,
+          projectIds: Object.keys(config.projectMappings || {}),
+        }),
+      });
+      mentionHeartbeatAt = Date.now();
+    }
+
+    const { trigger } = await fetchJson(
+      `${taskboardOrigin}/api/codex-targets/${encodeURIComponent(config.deviceTarget.id)}/triggers/claim`,
+      { method: "POST" },
+    );
+    if (!trigger) return;
+    try {
+      const threadId = await deliverMentionToDesktop(cdp, config, trigger);
+      await finishRemoteMention(trigger, { status: "completed", threadId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await finishRemoteMention(trigger, {
+        status: "failed",
+        error: message.slice(0, 4_000),
+      }).catch(() => {});
+      throw error;
+    }
+  } finally {
+    mentionDeliveryRunning = false;
+  }
+}
+
+function startRemoteMentionDelivery(cdp) {
+  if (mentionDeliveryTimer) return;
+  const run = () => void syncRemoteMentionDelivery(cdp).catch((error) => {
+    console.error(`Taskboard Desktop mention delivery failed: ${error.message}`);
+  });
+  run();
+  mentionDeliveryTimer = setInterval(run, 2_000);
+  mentionDeliveryTimer.unref();
+}
+
 async function sendHostResponse(cdp, executionContextId, response) {
   await cdp.send("Runtime.evaluate", {
     expression: `window.__codexTaskboardInjection__?.hostResponse(${JSON.stringify(response)})`,
@@ -1113,6 +1434,7 @@ async function installTaskboardHostBinding(cdp, supervisor) {
     });
   });
   await cdp.send("Runtime.addBinding", { name: hostBindingName });
+  startRemoteMentionDelivery(cdp);
   await restoreQuotaPolicies(cdp);
 }
 

@@ -18,9 +18,7 @@ import {
 } from "../shared/domain.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
-import { createMentionAutomationMemoryRecorder } from "./automation-memory.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
-import { CodexMentionDispatcher } from "./codex-mention-dispatcher.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
@@ -1352,19 +1350,10 @@ export function createTaskboardServer(options = {}) {
       });
     return adhdSkillPromise;
   };
-  const mentionDispatcher = options.mentionDispatcher ?? (
-    options.remoteFetch === undefined && typeof cloudConfig.ensureDeviceTarget === "function"
-      ? new CodexMentionDispatcher({
-          configStore: cloudConfig,
-          cloudProxy,
-          aiChat,
-          recordAutomationMemory: createMentionAutomationMemoryRecorder({
-            policiesPath: resolved.automationPoliciesPath,
-            automationsDirectory: resolved.automationsDirectory,
-          }),
-        })
-      : null
-  );
+  // Comment mentions are claimed by the resident Desktop injector so the turn is
+  // created by the real Codex Desktop host. The server-side AI chat runner uses
+  // `codex exec`, whose originator is intentionally rejected by workspace policy.
+  const mentionDispatcher = options.mentionDispatcher ?? null;
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -1459,6 +1448,20 @@ export function createTaskboardServer(options = {}) {
           );
         }
         return sendJson(response, 200, payload);
+      }
+
+      if (pathname === "/api/local/codex-target") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Codex target routes do not accept query parameters");
+        }
+        await assertEmptyRequestBody(request, "POST /api/local/codex-target");
+        const config = await cloudConfig.read();
+        if (!config.remoteUrl || !config.actorName) {
+          throw new ApiError(409, "CLOUD_NOT_CONFIGURED", "Cloud collaboration is not configured");
+        }
+        const updated = await cloudConfig.ensureDeviceTarget(`Codex · ${config.actorName}`);
+        return sendJson(response, 200, { target: updated.deviceTarget });
       }
 
       const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
