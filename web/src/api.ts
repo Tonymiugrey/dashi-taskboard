@@ -563,7 +563,15 @@ export async function updateCodexTargetAutomation(
     `/api/codex-targets/${encodeURIComponent(targetId)}/automations`,
     {
       method: "PATCH",
-      body: JSON.stringify({ projectId, ...automation }),
+      body: JSON.stringify({
+        projectId,
+        version: automation.version,
+        enabledByUser: automation.enabledByUser,
+        quotaAware: automation.quotaAware,
+        intervalMinutes: automation.intervalMinutes,
+        model: automation.model,
+        reasoningEffort: automation.reasoningEffort,
+      }),
     },
   );
   return data.automation;
