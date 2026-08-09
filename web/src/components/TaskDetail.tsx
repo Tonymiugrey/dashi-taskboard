@@ -62,6 +62,7 @@ import {
   IssueSubIssues,
   type RelationMutationResult,
 } from "./IssueRelations";
+import { readIssueIdentifier } from "../issueRoute";
 
 const PRIORITY_DETAILS: Record<TaskPriority, { label: string; bars: number }> = {
   none: { label: "无优先级", bars: 0 },
@@ -148,13 +149,40 @@ function contextLabel(context: DevelopmentContext): string {
   return `${context.branch ?? "detached"} · ${folder}`;
 }
 
-function DescriptionDocument({ value }: { value: string }) {
+function DescriptionDocument({
+  value,
+  tasks,
+  onOpenTask,
+}: {
+  value: string;
+  tasks: Task[];
+  onOpenTask: (task: TaskRelationSummary) => void;
+}) {
   return (
     <div className="issue-description-document">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+          a: ({ node: _node, href, ...props }) => {
+            const identifier = href
+              ? readIssueIdentifier(new URL(href, window.location.href).search)
+              : null;
+            const mentionedTask = identifier
+              ? tasks.find((task) => task.identifier === identifier)
+              : null;
+            return mentionedTask ? (
+              <a
+                {...props}
+                href={href}
+                onClick={(event) => {
+                  event.preventDefault();
+                  onOpenTask(mentionedTask);
+                }}
+              />
+            ) : (
+              <a {...props} href={href} target="_blank" rel="noreferrer" />
+            );
+          },
         }}
       >
         {value}
@@ -208,6 +236,9 @@ export function TaskDetail({
   const [currentTask, setCurrentTask] = useState(task);
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
+  const [descriptionSegments, setDescriptionSegments] = useState<InlineMediaSegment[]>(
+    () => createInlineMediaSegments(task.description),
+  );
   const [editingDescription, setEditingDescription] = useState(false);
   const [labelMenuOpen, setLabelMenuOpen] = useState(false);
   const [savingProperty, setSavingProperty] = useState<string | null>(null);
@@ -236,7 +267,7 @@ export function TaskDetail({
   const [pendingDelete, setPendingDelete] = useState<Comment | null>(null);
   const [deleting, setDeleting] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement>(null);
-  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+  const descriptionComposerRef = useRef<InlineMediaComposerHandle>(null);
   const composerRef = useRef<InlineMediaComposerHandle>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
@@ -245,23 +276,27 @@ export function TaskDetail({
   const draft = serializeInlineMedia(commentSegments);
   const commentInlineImages = inlineMediaImages(commentSegments);
   const pendingMentions = inlineMediaAssignments(commentSegments);
+  const issueMentionOptions = tasks.filter((candidate) => (
+    candidate.id !== currentTask.id && !candidate.archivedAt
+  ));
 
   useEffect(() => {
     setCurrentTask(task);
     if (document.activeElement !== titleRef.current) setTitle(task.title);
-    if (document.activeElement !== descriptionRef.current) setDescription(task.description);
+    if (!editingDescription) {
+      setDescription(task.description);
+      setDescriptionSegments(createInlineMediaSegments(task.description));
+    }
   }, [task]);
 
   useEffect(() => {
     resizeTextarea(titleRef.current);
-    resizeTextarea(descriptionRef.current);
   }, [title, description, editingDescription]);
 
   useEffect(() => {
     if (!editingDescription) return;
     requestAnimationFrame(() => {
-      descriptionRef.current?.focus();
-      resizeTextarea(descriptionRef.current);
+      descriptionComposerRef.current?.focus();
     });
   }, [editingDescription]);
 
@@ -412,8 +447,8 @@ export function TaskDetail({
     await saveTask({ title: normalized }, "title");
   }
 
-  async function saveDescription() {
-    const normalized = description.trim();
+  async function saveDescription(value = description) {
+    const normalized = value.trim();
     if (normalized === currentTask.description) return;
     await saveTask({ description: normalized }, "description");
   }
@@ -643,21 +678,23 @@ export function TaskDetail({
                   )}
                 />
                 {editingDescription ? (
-                  <textarea
-                    ref={descriptionRef}
+                  <InlineMediaComposer
+                    ref={descriptionComposerRef}
                     className="issue-description-input"
-                    rows={1}
-                    value={description}
-                    aria-label="议题描述"
+                    segments={descriptionSegments}
+                    ariaLabel="议题描述"
                     placeholder="添加描述…"
                     disabled={savingProperty === "description"}
-                    onChange={(event) => {
-                      setDescription(event.target.value);
-                      resizeTextarea(event.currentTarget);
+                    issueOptions={issueMentionOptions}
+                    onError={onError}
+                    onChange={(segments) => {
+                      setDescriptionSegments(segments);
+                      setDescription(serializeInlineMedia(segments));
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Escape") {
                         setDescription(currentTask.description);
+                        setDescriptionSegments(createInlineMediaSegments(currentTask.description));
                         setEditingDescription(false);
                       }
                     }}
@@ -680,7 +717,9 @@ export function TaskDetail({
                       }
                     }}
                   >
-                    {description ? <DescriptionDocument value={description} /> : "添加描述…"}
+                    {description ? (
+                      <DescriptionDocument value={description} tasks={tasks} onOpenTask={onOpenTask} />
+                    ) : "添加描述…"}
                   </div>
                 )}
                 {currentTask.threadId && (
@@ -888,7 +927,11 @@ export function TaskDetail({
                           </div>
                         </div>
                       ) : (
-                        comment.body && <div className="comment-body"><DescriptionDocument value={comment.body} /></div>
+                        comment.body && (
+                          <div className="comment-body">
+                            <DescriptionDocument value={comment.body} tasks={tasks} onOpenTask={onOpenTask} />
+                          </div>
+                        )
                       )}
                       {(comment.mentions ?? []).length > 0 && (
                         <div className="codex-assignment-list" aria-label="Codex 设备任务">
@@ -1015,6 +1058,7 @@ export function TaskDetail({
                   onError={setCommentsError}
                   onKeyDown={handleCommentComposerKeyDown}
                   mentionOptions={codexTargets}
+                  issueOptions={issueMentionOptions}
                   armedAssignmentId={pendingMentionDeleteId}
                   onArmedAssignmentChange={setPendingMentionDeleteId}
                 />
@@ -1031,9 +1075,11 @@ export function TaskDetail({
                     <button
                       className="comment-mention-button"
                       type="button"
-                      disabled={submitting || codexTargets.length === 0}
-                      aria-label="提及 Codex"
-                      title={codexTargets.length > 0 ? "提及 Codex" : "暂无可用的 Codex 目标"}
+                      disabled={submitting || (codexTargets.length === 0 && issueMentionOptions.length === 0)}
+                      aria-label="提及议题或 Codex"
+                      title={codexTargets.length > 0 || issueMentionOptions.length > 0
+                        ? "提及议题或 Codex"
+                        : "暂无可提及的议题或 Codex 目标"}
                       onClick={() => composerRef.current?.openMentionPicker()}
                     >
                       @

@@ -5,11 +5,11 @@ import {
   useRef,
   useState,
   type ClipboardEvent,
+  type FocusEventHandler,
   type KeyboardEvent,
   type KeyboardEventHandler,
 } from "react";
-import type { Attachment } from "../types";
-import type { CodexTarget } from "../types";
+import type { Attachment, CodexTarget, TaskRelationSummary } from "../types";
 import { attachmentContentUrl } from "../api";
 import { resolveAssignmentBackspace } from "../../../shared/assignment-delete-confirmation.mjs";
 import { resolveComposerArrowBoundary } from "../../../shared/composer-arrow-navigation.mjs";
@@ -36,7 +36,17 @@ export interface InlineAssignmentSegment {
   instruction: string;
 }
 
-export type InlineMediaSegment = InlineTextSegment | InlineImageSegment | InlineAssignmentSegment;
+interface InlineIssueMentionSegment {
+  id: string;
+  type: "issue-mention";
+  task: TaskRelationSummary;
+}
+
+export type InlineMediaSegment =
+  | InlineTextSegment
+  | InlineImageSegment
+  | InlineAssignmentSegment
+  | InlineIssueMentionSegment;
 export type PendingInlineImage = InlineImageSegment;
 
 export interface InlineMediaComposerHandle {
@@ -53,7 +63,9 @@ interface InlineMediaComposerProps {
   onChange: (segments: InlineMediaSegment[]) => void;
   onError: (message: string | null) => void;
   onKeyDown?: KeyboardEventHandler<HTMLTextAreaElement>;
+  onBlur?: FocusEventHandler<HTMLTextAreaElement>;
   mentionOptions?: CodexTarget[];
+  issueOptions?: TaskRelationSummary[];
   armedAssignmentId?: string | null;
   onArmedAssignmentChange?: (targetId: string | null) => void;
 }
@@ -88,6 +100,14 @@ function assignmentSegment(target: CodexTarget): InlineAssignmentSegment {
   };
 }
 
+function issueMentionSegment(task: TaskRelationSummary): InlineIssueMentionSegment {
+  return {
+    id: segmentId("issue"),
+    type: "issue-mention",
+    task,
+  };
+}
+
 export function createInlineMediaSegments(text = ""): InlineMediaSegment[] {
   return [textSegment(text)];
 }
@@ -110,7 +130,11 @@ export function serializeInlineMedia(segments: InlineMediaSegment[]): string {
   return segments.map((segment) => (
     segment.type === "text"
       ? segment.text
-      : segment.type === "pending-image" ? `\n\n${segment.token}\n\n` : ""
+      : segment.type === "pending-image"
+        ? `\n\n${segment.token}\n\n`
+        : segment.type === "issue-mention"
+          ? `[@${segment.task.identifier}](?project=${encodeURIComponent(segment.task.projectId)}&issue=${encodeURIComponent(segment.task.identifier)})`
+          : ""
   )).join("");
 }
 
@@ -197,7 +221,9 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     onChange,
     onError,
     onKeyDown,
+    onBlur,
     mentionOptions = [],
+    issueOptions = [],
     armedAssignmentId = null,
     onArmedAssignmentChange,
   }, ref) {
@@ -236,10 +262,10 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
         if (firstText) textareas.current.get(firstText.id)?.focus();
       },
       openMentionPicker,
-    }), [mentionOptions, segments]);
+    }), [issueOptions, mentionOptions, segments]);
 
     function openMentionPicker() {
-      if (mentionOptions.length === 0) return;
+      if (mentionOptions.length === 0 && issueOptions.length === 0) return;
       const focusedEntry = [...textareas.current.entries()].find(([, element]) => (
         element === document.activeElement
       ));
@@ -276,7 +302,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       )));
       const before = text.slice(0, cursor);
       const match = before.match(/(?:^|\s)(@([^\s@]{0,120}))$/);
-      if (!match || mentionOptions.length === 0) {
+      if (!match || (mentionOptions.length === 0 && issueOptions.length === 0)) {
         setMentionMenu(null);
         return;
       }
@@ -293,30 +319,44 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       (assignment) => assignment.target.id,
     ));
     const filteredMentions = mentionMenu
-      ? mentionOptions.filter((target) => (
-          !assignedTargetIds.has(target.id)
-          && target.name.toLocaleLowerCase().includes(mentionMenu.query.toLocaleLowerCase())
-        ))
+      ? [
+          ...issueOptions
+            .filter((task) => (
+              `${task.identifier} ${task.title}`
+                .toLocaleLowerCase()
+                .includes(mentionMenu.query.toLocaleLowerCase())
+            ))
+            .map((task) => ({ kind: "issue" as const, task })),
+          ...mentionOptions
+            .filter((target) => (
+              !assignedTargetIds.has(target.id)
+              && target.name.toLocaleLowerCase().includes(mentionMenu.query.toLocaleLowerCase())
+            ))
+            .map((target) => ({ kind: "codex" as const, target })),
+        ]
       : [];
 
-    function chooseMention(target: CodexTarget) {
+    function chooseMention(option: (typeof filteredMentions)[number]) {
       if (!mentionMenu) return;
       const segment = segments.find((candidate) => (
         candidate.id === mentionMenu.segmentId && candidate.type === "text"
       ));
       if (!segment || segment.type !== "text") return;
       const before = { ...segment, text: segment.text.slice(0, mentionMenu.start) };
-      const assignment = assignmentSegment(target);
       const after = textSegment(segment.text.slice(mentionMenu.end));
-      pendingAssignmentFocus.current = assignment.id;
+      const insertion = option.kind === "issue"
+        ? issueMentionSegment(option.task)
+        : assignmentSegment(option.target);
+      if (insertion.type === "codex-assignment") pendingAssignmentFocus.current = insertion.id;
+      else pendingFocus.current = { id: after.id, offset: 0 };
       onChange(segments.flatMap((candidate) => (
-        candidate.id === segment.id ? [before, assignment, after] : [candidate]
+        candidate.id === segment.id ? [before, insertion, after] : [candidate]
       )));
       onArmedAssignmentChange?.(null);
       setMentionMenu(null);
     }
 
-    function removeAssignment(id: string) {
+    function removeInlineSegment(id: string) {
       const index = segments.findIndex((segment) => segment.id === id);
       const before = segments[index - 1];
       const after = segments[index + 1];
@@ -351,7 +391,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       });
       if (action === "pass") return false;
       event.preventDefault();
-      if (action === "delete" && assignmentId) removeAssignment(assignmentId);
+      if (action === "delete" && assignmentId) removeInlineSegment(assignmentId);
       else if (targetId) onArmedAssignmentChange?.(targetId);
       return true;
     }
@@ -489,11 +529,13 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     const isEmpty = segments.every((segment) => (
       segment.type === "text" ? segment.text.length === 0 : false
     ));
-    const hasAssignments = segments.some((segment) => segment.type === "codex-assignment");
+    const hasInlineObjects = segments.some((segment) => (
+      segment.type === "codex-assignment" || segment.type === "issue-mention"
+    ));
 
     return (
       <div
-        className={`inline-media-composer${hasAssignments ? " has-inline-assignments" : ""} ${className}`.trim()}
+        className={`inline-media-composer${hasInlineObjects ? " has-inline-assignments" : ""} ${className}`.trim()}
         aria-label={ariaLabel}
       >
         {segments.map((segment, index) => (
@@ -522,6 +564,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
               onBlur={(event) => {
                 if (!event.currentTarget.parentElement?.contains(event.relatedTarget)) {
                   setMentionMenu(null);
+                  onBlur?.(event);
                 }
               }}
             />
@@ -532,6 +575,19 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
               disabled={disabled}
               onRemove={() => removeImage(segment.id)}
             />
+          ) : segment.type === "issue-mention" ? (
+            <span className="inline-issue-mention" key={segment.id}>
+              <strong>@{segment.task.identifier}</strong>
+              <span>{segment.task.title}</span>
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={`移除议题 ${segment.task.identifier}`}
+                onClick={() => removeInlineSegment(segment.id)}
+              >
+                <LinearIcon name="close" />
+              </button>
+            </span>
           ) : (
             <label
               key={segment.id}
@@ -572,7 +628,7 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
                 type="button"
                 disabled={disabled}
                 aria-label={`移除 ${segment.target.name} 的任务`}
-                onClick={() => removeAssignment(segment.id)}
+                onClick={() => removeInlineSegment(segment.id)}
               >
                 <LinearIcon name="close" />
               </button>
@@ -580,21 +636,31 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
           )
         ))}
         {mentionMenu && filteredMentions.length > 0 && (
-          <div className="codex-mention-menu" role="listbox" aria-label="选择 Codex 目标">
-            <div className="codex-mention-menu-title">分配设备任务</div>
-            {filteredMentions.map((target, index) => (
+          <div className="codex-mention-menu" role="listbox" aria-label="选择议题或 Codex 目标">
+            <div className="codex-mention-menu-title">提及议题或分配设备任务</div>
+            {filteredMentions.map((option, index) => (
               <button
                 type="button"
                 role="option"
                 aria-selected={index === mentionMenu.selectedIndex}
                 className={index === mentionMenu.selectedIndex ? "is-selected" : ""}
-                key={target.id}
+                key={option.kind === "issue" ? `issue-${option.task.id}` : `codex-${option.target.id}`}
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={() => chooseMention(target)}
+                onClick={() => chooseMention(option)}
               >
-                <span className={`codex-target-presence ${target.online ? "is-online" : ""}`} />
-                <strong>{target.name}</strong>
-                <span>{target.online ? "在线，立即处理" : "离线，上线后处理"}</span>
+                {option.kind === "issue" ? (
+                  <>
+                    <span className="issue-mention-marker">@</span>
+                    <strong>{option.task.identifier}</strong>
+                    <span>{option.task.title}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className={`codex-target-presence ${option.target.online ? "is-online" : ""}`} />
+                    <strong>{option.target.name}</strong>
+                    <span>{option.target.online ? "在线，立即处理" : "离线，上线后处理"}</span>
+                  </>
+                )}
               </button>
             ))}
           </div>
