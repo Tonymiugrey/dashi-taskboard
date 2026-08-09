@@ -1,4 +1,8 @@
 import { normalizeWorkflowSnapshot } from "../../shared/workflow-control-flow.mjs";
+import {
+  isAutomationModel,
+  isSupportedModelEffort,
+} from "../../shared/taskboard-automation-options.mjs";
 
 const JSON_BODY_LIMIT = 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
@@ -1007,6 +1011,102 @@ function parseCodexTargetHeartbeat(body) {
   };
 }
 
+function parseAutomationOptions(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "projectId",
+    "version",
+    "enabledByUser",
+    "quotaAware",
+    "intervalMinutes",
+    "model",
+    "reasoningEffort",
+  ]));
+  if (typeof body.enabledByUser !== "boolean" || typeof body.quotaAware !== "boolean") {
+    throw new ApiError(400, "INVALID_FIELD", "Automation switches must be boolean");
+  }
+  if (![5, 10, 15, 30, 60].includes(body.intervalMinutes)) {
+    throw new ApiError(400, "INVALID_FIELD", "'intervalMinutes' must be 5, 10, 15, 30, or 60");
+  }
+  if (!isAutomationModel(body.model) || !isSupportedModelEffort(body.model, body.reasoningEffort)) {
+    throw new ApiError(400, "INVALID_FIELD", "Unsupported automation model or reasoning effort");
+  }
+  return {
+    projectId: validateProjectId(body.projectId),
+    version: parseVersion(body.version, { allowZero: true }),
+    enabledByUser: body.enabledByUser,
+    quotaAware: body.quotaAware,
+    intervalMinutes: body.intervalMinutes,
+    model: body.model,
+    reasoningEffort: body.reasoningEffort,
+  };
+}
+
+function parseAutomationReport(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["version", "status", "quota"]));
+  if (body.status !== "ACTIVE" && body.status !== "PAUSED") {
+    throw new ApiError(400, "INVALID_FIELD", "'status' must be ACTIVE or PAUSED");
+  }
+  let quota = null;
+  if (body.quota !== undefined && body.quota !== null) {
+    assertPlainObject(body.quota);
+    assertAllowedKeys(body.quota, new Set(["state", "checkedAt", "resetsAt", "reason", "windows"]));
+    if (!["available", "blocked", "unknown", "unavailable"].includes(body.quota.state)) {
+      throw new ApiError(400, "INVALID_FIELD", "Invalid quota state");
+    }
+    if (!Number.isSafeInteger(body.quota.checkedAt) || body.quota.checkedAt < 0) {
+      throw new ApiError(400, "INVALID_FIELD", "'quota.checkedAt' must be a timestamp");
+    }
+    if (body.quota.resetsAt !== undefined && !Number.isSafeInteger(body.quota.resetsAt)) {
+      throw new ApiError(400, "INVALID_FIELD", "'quota.resetsAt' must be a timestamp");
+    }
+    const windows = body.quota.windows === undefined
+      ? []
+      : body.quota.windows;
+    if (!Array.isArray(windows) || windows.length > 4) {
+      throw new ApiError(400, "INVALID_FIELD", "'quota.windows' must contain at most 4 windows");
+    }
+    quota = {
+      state: body.quota.state,
+      checkedAt: body.quota.checkedAt,
+      resetsAt: body.quota.resetsAt ?? null,
+      reason: stringField(body.quota.reason ?? null, "quota.reason", {
+        nullable: true,
+        maxLength: 64,
+      }),
+      windows: windows.map((window, index) => {
+        assertPlainObject(window);
+        assertAllowedKeys(window, new Set(["label", "remainingPercent", "resetsAt"]));
+        if (
+          typeof window.remainingPercent !== "number"
+          || !Number.isFinite(window.remainingPercent)
+          || window.remainingPercent < 0
+          || window.remainingPercent > 100
+        ) {
+          throw new ApiError(400, "INVALID_FIELD", `'quota.windows[${index}].remainingPercent' is invalid`);
+        }
+        if (window.resetsAt !== undefined && !Number.isSafeInteger(window.resetsAt)) {
+          throw new ApiError(400, "INVALID_FIELD", `'quota.windows[${index}].resetsAt' is invalid`);
+        }
+        return {
+          label: stringField(window.label, `quota.windows[${index}].label`, {
+            required: true,
+            maxLength: 64,
+          }),
+          remainingPercent: window.remainingPercent,
+          ...(window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt }),
+        };
+      }),
+    };
+  }
+  return {
+    version: parseVersion(body.version),
+    status: body.status,
+    quota,
+  };
+}
+
 function parseCodexTriggerResult(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set(["claimToken", "status", "threadId", "error", "checkpoint"]));
@@ -1949,10 +2049,28 @@ async function createComment(env, taskId, input, actor) {
 async function listCodexTargets(env, projectId) {
   await requireProject(env, projectId);
   const rows = await all(env.DB.prepare(`
-    SELECT codex_targets.*
+    SELECT
+      codex_targets.*,
+      codex_target_automations.enabled_by_user,
+      codex_target_automations.quota_aware,
+      codex_target_automations.interval_minutes,
+      codex_target_automations.model,
+      codex_target_automations.reasoning_effort,
+      codex_target_automations.version AS automation_version,
+      codex_target_automations.applied_version,
+      codex_target_automations.status AS automation_status,
+      codex_target_automations.quota_state,
+      codex_target_automations.quota_checked_at,
+      codex_target_automations.quota_resets_at,
+      codex_target_automations.quota_reason,
+      codex_target_automations.quota_windows,
+      codex_target_automations.reported_at
     FROM codex_targets
     JOIN codex_target_projects
       ON codex_target_projects.target_id = codex_targets.id
+    LEFT JOIN codex_target_automations
+      ON codex_target_automations.target_id = codex_targets.id
+      AND codex_target_automations.project_id = codex_target_projects.project_id
     WHERE codex_target_projects.project_id = ?
     ORDER BY codex_targets.name COLLATE NOCASE, codex_targets.id
   `).bind(projectId));
@@ -1962,7 +2080,184 @@ async function listCodexTargets(env, projectId) {
     name: row.name,
     online: new Date(row.last_seen_at).getTime() >= onlineAfter,
     lastSeenAt: row.last_seen_at,
+    automation: automationFromRow(row),
   }));
+}
+
+function automationFromRow(row) {
+  if (row.automation_version === null || row.automation_version === undefined) return null;
+  return {
+    enabledByUser: Boolean(row.enabled_by_user),
+    quotaAware: Boolean(row.quota_aware),
+    intervalMinutes: row.interval_minutes,
+    model: row.model,
+    reasoningEffort: row.reasoning_effort,
+    version: row.automation_version,
+    appliedVersion: row.applied_version,
+    status: row.automation_status,
+    quota: row.quota_state
+      ? {
+          state: row.quota_state,
+          checkedAt: row.quota_checked_at,
+          ...(row.quota_resets_at === null ? {} : { resetsAt: row.quota_resets_at }),
+          ...(row.quota_reason === null ? {} : { reason: row.quota_reason }),
+          windows: row.quota_windows ? JSON.parse(row.quota_windows) : [],
+        }
+      : null,
+    reportedAt: row.reported_at,
+  };
+}
+
+async function requireCodexTargetProject(env, targetId, projectId) {
+  const row = await env.DB.prepare(`
+    SELECT codex_targets.id
+    FROM codex_targets
+    JOIN codex_target_projects
+      ON codex_target_projects.target_id = codex_targets.id
+    WHERE codex_targets.id = ? AND codex_target_projects.project_id = ?
+  `).bind(targetId, projectId).first();
+  if (!row) {
+    throw new ApiError(
+      404,
+      "CODEX_TARGET_NOT_FOUND",
+      `Codex target '${targetId}' is not available for project '${projectId}'`,
+    );
+  }
+}
+
+async function updateCodexTargetAutomation(env, targetId, input) {
+  await requireCodexTargetProject(env, targetId, input.projectId);
+  const timestamp = now();
+  const current = await env.DB.prepare(`
+    SELECT version FROM codex_target_automations WHERE target_id = ? AND project_id = ?
+  `).bind(targetId, input.projectId).first();
+  const actualVersion = current?.version ?? 0;
+  if (actualVersion !== input.version) {
+    throw new ApiError(409, "VERSION_CONFLICT", "Device automation was changed by another client", {
+      expectedVersion: input.version,
+      actualVersion,
+    });
+  }
+  if (!current) {
+    await env.DB.prepare(`
+      INSERT INTO codex_target_automations (
+        target_id, project_id, enabled_by_user, quota_aware, interval_minutes,
+        model, reasoning_effort, version, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+    `).bind(
+      targetId,
+      input.projectId,
+      Number(input.enabledByUser),
+      Number(input.quotaAware),
+      input.intervalMinutes,
+      input.model,
+      input.reasoningEffort,
+      timestamp,
+    ).run();
+  } else {
+    const result = await env.DB.prepare(`
+      UPDATE codex_target_automations
+      SET
+        enabled_by_user = ?,
+        quota_aware = ?,
+        interval_minutes = ?,
+        model = ?,
+        reasoning_effort = ?,
+        version = version + 1,
+        updated_at = ?
+      WHERE target_id = ? AND project_id = ? AND version = ?
+    `).bind(
+      Number(input.enabledByUser),
+      Number(input.quotaAware),
+      input.intervalMinutes,
+      input.model,
+      input.reasoningEffort,
+      timestamp,
+      targetId,
+      input.projectId,
+      input.version,
+    ).run();
+    if (!changed(result)) {
+      const latest = await env.DB.prepare(`
+        SELECT version FROM codex_target_automations WHERE target_id = ? AND project_id = ?
+      `).bind(targetId, input.projectId).first();
+      throw new ApiError(409, "VERSION_CONFLICT", "Device automation was changed by another client", {
+        expectedVersion: input.version,
+        actualVersion: latest?.version ?? 0,
+      });
+    }
+  }
+  const row = await env.DB.prepare(`
+    SELECT *, version AS automation_version, status AS automation_status
+    FROM codex_target_automations WHERE target_id = ? AND project_id = ?
+  `).bind(targetId, input.projectId).first();
+  return automationFromRow(row);
+}
+
+async function listCodexTargetAutomations(env, targetId) {
+  const target = await env.DB.prepare("SELECT id FROM codex_targets WHERE id = ?")
+    .bind(targetId)
+    .first();
+  if (!target) {
+    throw new ApiError(404, "CODEX_TARGET_NOT_FOUND", `Codex target '${targetId}' does not exist`);
+  }
+  const rows = await all(env.DB.prepare(`
+    SELECT
+      codex_target_automations.*,
+      codex_target_automations.version AS automation_version,
+      codex_target_automations.status AS automation_status,
+      projects.name AS project_name
+    FROM codex_target_automations
+    JOIN projects ON projects.id = codex_target_automations.project_id
+    JOIN codex_target_projects
+      ON codex_target_projects.target_id = codex_target_automations.target_id
+      AND codex_target_projects.project_id = codex_target_automations.project_id
+    WHERE codex_target_automations.target_id = ?
+    ORDER BY projects.name COLLATE NOCASE, projects.id
+  `).bind(targetId));
+  return rows.map((row) => ({
+    projectId: row.project_id,
+    projectName: row.project_name,
+    ...automationFromRow(row),
+  }));
+}
+
+async function reportCodexTargetAutomation(env, targetId, projectId, input) {
+  await requireCodexTargetProject(env, targetId, projectId);
+  const result = await env.DB.prepare(`
+    UPDATE codex_target_automations
+    SET
+      applied_version = ?,
+      status = ?,
+      quota_state = ?,
+      quota_checked_at = ?,
+      quota_resets_at = ?,
+      quota_reason = ?,
+      quota_windows = ?,
+      reported_at = ?
+    WHERE target_id = ? AND project_id = ? AND version = ?
+  `).bind(
+    input.version,
+    input.status,
+    input.quota?.state ?? null,
+    input.quota?.checkedAt ?? null,
+    input.quota?.resetsAt ?? null,
+    input.quota?.reason ?? null,
+    input.quota ? JSON.stringify(input.quota.windows) : null,
+    now(),
+    targetId,
+    projectId,
+    input.version,
+  ).run();
+  if (!changed(result)) {
+    const latest = await env.DB.prepare(`
+      SELECT version FROM codex_target_automations WHERE target_id = ? AND project_id = ?
+    `).bind(targetId, projectId).first();
+    throw new ApiError(409, "VERSION_CONFLICT", "Device automation changed before it was applied", {
+      expectedVersion: input.version,
+      actualVersion: latest?.version ?? 0,
+    });
+  }
 }
 
 async function heartbeatCodexTarget(env, input) {
@@ -2449,6 +2744,50 @@ async function routeApi(request, env, actor, url) {
     if (request.method !== "POST") methodNotAllowed(["POST"]);
     requireNoQuery(url, "Codex target heartbeat");
     return json(200, await heartbeatCodexTarget(env, parseCodexTargetHeartbeat(await readJson(request))));
+  }
+
+  const codexTargetAutomationMatch = pathname.match(
+    /^\/api\/codex-targets\/([^/]+)\/automations$/,
+  );
+  if (codexTargetAutomationMatch) {
+    const targetId = parseCodexTargetId(
+      decodePathPart(codexTargetAutomationMatch[1], "Codex target id"),
+      "targetId",
+    );
+    if (request.method === "GET") {
+      requireNoQuery(url, "Codex target automations");
+      return json(200, { automations: await listCodexTargetAutomations(env, targetId) });
+    }
+    if (request.method === "PATCH") {
+      requireNoQuery(url, "Codex target automation");
+      const input = parseAutomationOptions(await readJson(request));
+      return json(200, {
+        automation: await updateCodexTargetAutomation(env, targetId, input),
+      });
+    }
+    methodNotAllowed(["GET", "PATCH"]);
+  }
+
+  const codexTargetAutomationReportMatch = pathname.match(
+    /^\/api\/codex-targets\/([^/]+)\/automations\/([^/]+)\/report$/,
+  );
+  if (codexTargetAutomationReportMatch) {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "Codex target automation report");
+    const targetId = parseCodexTargetId(
+      decodePathPart(codexTargetAutomationReportMatch[1], "Codex target id"),
+      "targetId",
+    );
+    const projectId = validateProjectId(
+      decodePathPart(codexTargetAutomationReportMatch[2], "Project id"),
+    );
+    await reportCodexTargetAutomation(
+      env,
+      targetId,
+      projectId,
+      parseAutomationReport(await readJson(request)),
+    );
+    return json(200, { ok: true });
   }
 
   const codexTargetClaimMatch = pathname.match(

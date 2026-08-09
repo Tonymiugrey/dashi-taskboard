@@ -1319,6 +1319,92 @@ kbd {
   color: var(--danger);
 }
 
+.device-automation-menu {
+  width: min(520px, calc(100vw - 16px));
+  max-height: min(560px, calc(100vh - 16px));
+  overflow: auto;
+}
+
+.device-automation-layout {
+  display: grid;
+  grid-template-columns: 174px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.device-automation-targets {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  padding-right: 12px;
+  border-right: var(--border-hairline) solid var(--border);
+}
+
+.device-automation-targets > button {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.device-automation-targets > button:hover,
+.device-automation-targets > button.is-selected {
+  background: var(--surface-hover);
+}
+
+.device-automation-targets > button > span {
+  display: grid;
+  min-width: 0;
+}
+
+.device-automation-targets strong,
+.device-automation-targets small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-automation-targets strong {
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.device-automation-targets small {
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.device-automation-settings {
+  min-width: 0;
+}
+
+.device-automation-quota-window {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 560px) {
+  .device-automation-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .device-automation-targets {
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    padding: 0 0 10px;
+    border-right: 0;
+    border-bottom: var(--border-hairline) solid var(--border);
+  }
+}
+
 :root[data-theme="dark"] .board-settings-menu {
   box-shadow: 0 20px 52px rgba(0, 0, 0, 0.56), 0 4px 14px rgba(0, 0, 0, 0.34), 0 0 0 0.5px rgba(255, 255, 255, 0.055);
 }

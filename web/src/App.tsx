@@ -29,6 +29,7 @@ import {
   getTaskboardMetadata,
   listDevelopmentContexts,
   listDeviceWorkspaces,
+  listCodexTargets,
   listProjects,
   listTasks,
   moveTask as moveTaskRequest,
@@ -38,6 +39,7 @@ import {
   setHostBridgeSession,
   uploadAttachment,
   updateTask as updateTaskRequest,
+  updateCodexTargetAutomation,
 } from "./api";
 import {
   actorForAssigneeTarget,
@@ -46,6 +48,7 @@ import {
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { AiChat } from "./components/AiChat";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
+import { DeviceAutomationMenu } from "./components/DeviceAutomationMenu";
 import { HiddenColumns } from "./components/HiddenColumns";
 import {
   resolveInlineMediaMarkdown,
@@ -70,6 +73,7 @@ import {
 import {
   TASK_STATUSES,
   type ActorIdentity,
+  type CodexTarget,
   type DevelopmentScan,
   type HostContext,
   type IssueRelationType,
@@ -606,6 +610,10 @@ export function App() {
   const [projectAutomations, setProjectAutomations] = useState(readProjectAutomations);
   const [automationPending, setAutomationPending] = useState(false);
   const [automationError, setAutomationError] = useState<string | null>(null);
+  const [codexTargets, setCodexTargets] = useState<CodexTarget[]>([]);
+  const [deviceAutomationLoading, setDeviceAutomationLoading] = useState(false);
+  const [deviceAutomationPending, setDeviceAutomationPending] = useState(false);
+  const [deviceAutomationError, setDeviceAutomationError] = useState<string | null>(null);
   const [announcement, setAnnouncementValue] = useState("");
   const [undoNotice, setUndoNotice] = useState<UndoNotice | null>(null);
   const tasksRequestRef = useRef(0);
@@ -958,6 +966,54 @@ export function App() {
     sendAutomationRequest,
     writeProjectAutomation,
   ]);
+
+  const loadDeviceAutomations = useCallback(async () => {
+    if (!selectedProjectId || deviceAutomationLoading) return;
+    setDeviceAutomationLoading(true);
+    setDeviceAutomationError(null);
+    try {
+      setCodexTargets(await listCodexTargets(selectedProjectId));
+    } catch (error) {
+      setDeviceAutomationError(error instanceof Error ? error.message : "无法读取设备状态");
+    } finally {
+      setDeviceAutomationLoading(false);
+    }
+  }, [deviceAutomationLoading, selectedProjectId]);
+
+  useEffect(() => {
+    if (taskboardMetadata?.mode === "cloud" && selectedProjectId) {
+      void loadDeviceAutomations();
+    } else {
+      setCodexTargets([]);
+    }
+  }, [selectedProjectId, taskboardMetadata?.mode]);
+
+  const saveDeviceAutomation = useCallback(async (
+    target: CodexTarget,
+    automation: NonNullable<CodexTarget["automation"]> | {
+      enabledByUser: boolean;
+      quotaAware: boolean;
+      intervalMinutes: AutomationIntervalMinutes;
+      model: AutomationModel;
+      reasoningEffort: AutomationReasoningEffort;
+      version: number;
+    },
+  ) => {
+    if (!selectedProjectId || deviceAutomationPending) return;
+    setDeviceAutomationPending(true);
+    setDeviceAutomationError(null);
+    try {
+      const updated = await updateCodexTargetAutomation(target.id, selectedProjectId, automation);
+      setCodexTargets((current) => current.map((candidate) => (
+        candidate.id === target.id ? { ...candidate, automation: updated } : candidate
+      )));
+    } catch (error) {
+      setDeviceAutomationError(error instanceof Error ? error.message : "无法更新设备自动认领配置");
+      void loadDeviceAutomations();
+    } finally {
+      setDeviceAutomationPending(false);
+    }
+  }, [deviceAutomationPending, loadDeviceAutomations, selectedProjectId]);
 
   function openTaskDetail(task: Pick<Task, "identifier" | "projectId">) {
     closeContextMenu();
@@ -2058,7 +2114,16 @@ export function App() {
           <div ref={dragRegionRef} className="workspace-drag-region" aria-hidden="true" />
 
           <div className="header-actions">
-            {selectedProjectId && (
+            {selectedProjectId && taskboardMetadata?.mode === "cloud" ? (
+              <DeviceAutomationMenu
+                targets={codexTargets}
+                loading={deviceAutomationLoading}
+                pending={deviceAutomationPending}
+                error={deviceAutomationError}
+                onOpen={() => void loadDeviceAutomations()}
+                onChange={(target, automation) => void saveDeviceAutomation(target, automation)}
+              />
+            ) : selectedProjectId && (
               <ProjectAutomationMenu
                 automation={selectedProjectAutomation}
                 pending={automationPending}

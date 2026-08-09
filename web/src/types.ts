@@ -1,3 +1,8 @@
+import type {
+  AutomationModel,
+  AutomationReasoningEffort,
+} from "../../shared/taskboard-automation-options.mjs";
+
 export const TASK_STATUSES = [
   "backlog",
   "todo",
@@ -245,6 +250,30 @@ export interface CodexTarget {
   name: string;
   online: boolean;
   lastSeenAt: string;
+  automation: CodexTargetAutomation | null;
+}
+
+export interface CodexTargetAutomation {
+  enabledByUser: boolean;
+  quotaAware: boolean;
+  intervalMinutes: 5 | 10 | 15 | 30 | 60;
+  model: AutomationModel;
+  reasoningEffort: AutomationReasoningEffort;
+  version: number;
+  appliedVersion: number;
+  status: "ACTIVE" | "PAUSED" | null;
+  quota: {
+    state: "available" | "blocked" | "unknown" | "unavailable";
+    checkedAt: number;
+    resetsAt?: number;
+    reason?: string;
+    windows: Array<{
+      label: string;
+      remainingPercent: number;
+      resetsAt?: number;
+    }>;
+  } | null;
+  reportedAt: string | null;
 }
 
 export interface CodexMention {

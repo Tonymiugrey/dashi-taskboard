@@ -45,9 +45,12 @@ let codexAutomationRequestSequence = 0;
 const quotaPolicyTimers = new Map();
 const quotaPolicyRecords = new Map();
 const quotaPolicyQueues = new Map();
+const remoteAutomationVersions = new Map();
 let quotaPoliciesLoadPromise = null;
 let quotaPoliciesWritePromise = Promise.resolve();
 let quotaPoliciesRestored = false;
+let remoteAutomationTimer = null;
+let remoteAutomationSyncing = false;
 
 function parseArgs(argv) {
   const options = {
@@ -800,6 +803,7 @@ function enqueueQuotaPolicyMutation(record, cdp, rpc) {
         current.request = { ...current.request, automationId: result.item.id };
         await persistQuotaPolicies();
       }
+      await reportRemoteAutomationPolicy(key, current.request, result).catch(() => {});
       scheduleQuotaPolicyCheck(current, cdp, result);
       return result;
     });
@@ -808,6 +812,72 @@ function enqueueQuotaPolicyMutation(record, cdp, rpc) {
   });
   quotaPolicyQueues.set(key, tracked);
   return tracked;
+}
+
+async function reportRemoteAutomationPolicy(projectId, request, result) {
+  const remote = remoteAutomationVersions.get(projectId);
+  if (!remote) return;
+  await fetchJson(
+    `${taskboardOrigin}/api/codex-targets/${encodeURIComponent(remote.targetId)}`
+      + `/automations/${encodeURIComponent(projectId)}/report`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        version: remote.version,
+        status: result.item?.status === "ACTIVE" ? "ACTIVE" : "PAUSED",
+        ...(request.quotaAware && result.quota ? { quota: result.quota } : {}),
+      }),
+    },
+  );
+}
+
+async function syncRemoteAutomationPolicies(cdp) {
+  if (remoteAutomationSyncing) return;
+  remoteAutomationSyncing = true;
+  try {
+    let config;
+    try {
+      config = JSON.parse(await readFile(cloudConfigPath, "utf8"));
+    } catch {
+      return;
+    }
+    if (!config?.remoteUrl || !config.deviceTarget?.id) return;
+    const [payload, metadata] = await Promise.all([
+      fetchJson(
+        `${taskboardOrigin}/api/codex-targets/${encodeURIComponent(config.deviceTarget.id)}/automations`,
+      ),
+      fetchJson(`${taskboardOrigin}/api/meta`),
+    ]);
+    await ensureQuotaPoliciesLoaded();
+    for (const automation of payload.automations ?? []) {
+      const workspacePath = config.projectMappings?.[automation.projectId];
+      if (!workspacePath || !metadata.manageTaskboardSkillPath || !metadata.iHaveAdhdSkill?.path) continue;
+      const applied = remoteAutomationVersions.get(automation.projectId);
+      if (applied?.targetId === config.deviceTarget.id && applied.version === automation.version) continue;
+      const previous = quotaPolicyRecords.get(automation.projectId)?.request;
+      remoteAutomationVersions.set(automation.projectId, {
+        targetId: config.deviceTarget.id,
+        version: automation.version,
+      });
+      await updateAndApplyQuotaPolicy({
+        taskboardProjectId: automation.projectId,
+        codexProjectId: automation.projectId,
+        projectName: automation.projectName,
+        workspacePath,
+        skillPath: metadata.manageTaskboardSkillPath,
+        adhdSkillPath: metadata.iHaveAdhdSkill.path,
+        ...(previous?.automationId ? { automationId: previous.automationId } : {}),
+        enabledByUser: automation.enabledByUser,
+        quotaAware: automation.quotaAware,
+        intervalMinutes: automation.intervalMinutes,
+        model: automation.model,
+        reasoningEffort: automation.reasoningEffort,
+      }, cdp, (method, body) => requestCodexAutomationViaCdp(cdp, undefined, method, body));
+    }
+  } finally {
+    remoteAutomationSyncing = false;
+  }
 }
 
 async function updateAndApplyQuotaPolicy(request, cdp, rpc) {
@@ -859,6 +929,15 @@ async function restoreQuotaPolicies(cdp) {
       });
     }
   }
+  await syncRemoteAutomationPolicies(cdp).catch((error) => {
+    console.error(`Taskboard remote automation sync failed: ${error.message}`);
+  });
+  remoteAutomationTimer = setInterval(() => {
+    void syncRemoteAutomationPolicies(cdp).catch((error) => {
+      console.error(`Taskboard remote automation sync failed: ${error.message}`);
+    });
+  }, 15_000);
+  remoteAutomationTimer.unref();
 }
 
 async function prefillTaskComposerViaCdp(cdp, executionContextId, request) {

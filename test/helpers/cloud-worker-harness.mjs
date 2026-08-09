@@ -11,6 +11,7 @@ const MIGRATION_PATHS = [
   path.join(PROJECT_ROOT, "cloud", "migrations", "0001_initial.sql"),
   path.join(PROJECT_ROOT, "cloud", "migrations", "0002_codex_mentions.sql"),
   path.join(PROJECT_ROOT, "cloud", "migrations", "0003_codex_assignments.sql"),
+  path.join(PROJECT_ROOT, "cloud", "migrations", "0004_device_automation_settings.sql"),
 ];
 
 async function requireCloudImplementation() {

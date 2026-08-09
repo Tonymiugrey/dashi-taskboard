@@ -121,6 +121,23 @@ function evaluateRateLimits(result, model, checkedAt) {
   if (!snapshot) return { state: "unknown", checkedAt };
 
   const windows = [snapshot.primary, snapshot.secondary].filter(Boolean);
+  const quotaWindows = windows.flatMap((window, index) => {
+    const usedPercent = Number(window.usedPercent);
+    if (!Number.isFinite(usedPercent)) return [];
+    const durationMinutes = Number(window.windowDurationMins);
+    const resetsAt = Number(window.resetsAt);
+    return [{
+      label: Number.isFinite(durationMinutes)
+        ? durationMinutes >= 24 * 60 && durationMinutes % (24 * 60) === 0
+          ? `${durationMinutes / (24 * 60)} 天`
+          : durationMinutes >= 60 && durationMinutes % 60 === 0
+            ? `${durationMinutes / 60} 小时`
+            : `${durationMinutes} 分钟`
+        : index === 0 ? "短周期" : "长周期",
+      remainingPercent: Math.max(0, Math.min(100, 100 - usedPercent)),
+      ...(Number.isFinite(resetsAt) ? { resetsAt } : {}),
+    }];
+  });
   const creditsAvailable = snapshot.credits?.unlimited === true
     || snapshot.credits?.hasCredits === true;
   const exhaustedWindows = windows.filter((window) => (
@@ -132,7 +149,7 @@ function evaluateRateLimits(result, model, checkedAt) {
     || individuallyExhausted
     || (exhaustedWindows.length > 0 && !creditsAvailable);
 
-  if (!blocked) return { state: "available", checkedAt };
+  if (!blocked) return { state: "available", checkedAt, windows: quotaWindows };
 
   const resetCandidates = [
     ...exhaustedWindows.map((window) => Number(window.resetsAt)),
@@ -145,6 +162,7 @@ function evaluateRateLimits(result, model, checkedAt) {
   return {
     state: "blocked",
     checkedAt,
+    windows: quotaWindows,
     ...(Number.isFinite(resetsAt) ? { resetsAt } : {}),
   };
 }

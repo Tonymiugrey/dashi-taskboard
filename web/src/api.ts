@@ -9,6 +9,7 @@ import type {
   Attachment,
   Comment,
   CodexTarget,
+  CodexTargetAutomation,
   DevelopmentScan,
   IssueRelationType,
   Project,
@@ -548,6 +549,24 @@ export async function listCodexTargets(
   const query = new URLSearchParams({ projectId });
   const data = await request<{ targets: CodexTarget[] }>(`/api/codex-targets?${query}`, { signal });
   return data.targets;
+}
+
+export async function updateCodexTargetAutomation(
+  targetId: string,
+  projectId: string,
+  automation: Pick<
+    CodexTargetAutomation,
+    "enabledByUser" | "quotaAware" | "intervalMinutes" | "model" | "reasoningEffort" | "version"
+  >,
+): Promise<CodexTargetAutomation> {
+  const data = await request<{ automation: CodexTargetAutomation }>(
+    `/api/codex-targets/${encodeURIComponent(targetId)}/automations`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ projectId, ...automation }),
+    },
+  );
+  return data.automation;
 }
 
 export async function createComment(
