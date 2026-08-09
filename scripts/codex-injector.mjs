@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { resolvePort } from "../server/app.mjs";
 import { buildMentionAssignmentMessage } from "../server/codex-mention-dispatcher.mjs";
@@ -24,6 +25,7 @@ import {
 import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
 
 const injectorPath = fileURLToPath(import.meta.url);
+const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
 const defaultCodexDebuggingPort = 9229;
 const injectionPath = path.join(projectRoot, "inject", "codex-taskboard.user.js");
@@ -44,6 +46,7 @@ const codexAutomationMethods = new Set([
   "automation-update",
 ]);
 let codexAutomationRequestSequence = 0;
+let codexDynamicToolRequestSequence = 0;
 const quotaPolicyTimers = new Map();
 const quotaPolicyRecords = new Map();
 const quotaPolicyQueues = new Map();
@@ -656,6 +659,99 @@ async function requestCodexAutomationViaCdp(cdp, executionContextId, method, par
   return requestCodexHostViaCdp(cdp, executionContextId, method, params);
 }
 
+async function requestCodexDynamicToolViaCdp(
+  cdp,
+  { sourceThreadId, tool, arguments: toolArguments },
+) {
+  const requestId = [
+    "taskboard-mention",
+    process.pid,
+    Date.now().toString(36),
+    (++codexDynamicToolRequestSequence).toString(36),
+  ].join("-");
+  const callId = randomUUID();
+  const turnId = randomUUID();
+  const evaluation = await cdp.send("Runtime.evaluate", {
+    expression: `(() => new Promise((resolve) => {
+      const requestId = ${JSON.stringify(requestId)};
+      const hostId = "local";
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        window.removeEventListener("codex-message-from-view", onResponse);
+        resolve(result);
+      };
+      const onResponse = (event) => {
+        const message = event.detail;
+        const response = message?.response;
+        if (
+          message?.type !== "mcp-response"
+          || message.hostId !== hostId
+          || String(response?.id ?? "") !== requestId
+        ) return;
+        if (response.error) {
+          finish({
+            ok: false,
+            error: response.error.message || JSON.stringify(response.error),
+          });
+          return;
+        }
+        finish({ ok: true, result: response.result });
+      };
+      const timeout = window.setTimeout(
+        () => finish({ ok: false, error: "Codex Desktop 动态工具没有响应" }),
+        30_000,
+      );
+      window.addEventListener("codex-message-from-view", onResponse);
+      window.postMessage({
+        type: "dynamic-tool-call-requested",
+        hostId,
+        serverRequest: {
+          id: requestId,
+          method: "item/tool/call",
+          params: {
+            threadId: ${JSON.stringify(sourceThreadId)},
+            turnId: ${JSON.stringify(turnId)},
+            callId: ${JSON.stringify(callId)},
+            namespace: null,
+            tool: ${JSON.stringify(tool)},
+            arguments: ${JSON.stringify(toolArguments)},
+          },
+        },
+      }, window.location.origin === "null" ? "*" : window.location.origin);
+    }))()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (evaluation.exceptionDetails) {
+    throw new Error(
+      evaluation.exceptionDetails.exception?.description
+      || "Codex Desktop dynamic tool request failed",
+    );
+  }
+  const response = evaluation.result.value;
+  if (!response?.ok) {
+    throw new Error(response?.error || "Codex Desktop dynamic tool request failed");
+  }
+  const result = response.result;
+  const textItems = Array.isArray(result?.contentItems)
+    ? result.contentItems
+      .filter((item) => item?.type === "inputText" && typeof item.text === "string")
+      .map((item) => item.text)
+    : [];
+  if (result?.success !== true) {
+    throw new Error(textItems.join("\n") || `Codex Desktop rejected ${tool}`);
+  }
+  if (textItems.length === 0) return null;
+  try {
+    return JSON.parse(textItems[0]);
+  } catch {
+    return textItems[0];
+  }
+}
+
 async function applyTaskboardAutomationPolicy(request, rpc, stillCurrent = () => true) {
   const [quota, readiness] = await Promise.all([
     request.quotaAware ? readCodexQuotaStatus(request.model) : null,
@@ -1131,48 +1227,196 @@ function normalizeDesktopThreadId(value) {
 async function desktopHasThread(cdp, threadId) {
   const normalizedThreadId = normalizeDesktopThreadId(threadId);
   if (!normalizedThreadId) return false;
-  const recentThreadIds = await requestCodexHostViaCdp(
-    cdp,
-    undefined,
-    "load-recent-conversation-ids-for-host",
-    { hostId: "local", conversationIds: [normalizedThreadId] },
-  );
-  return Array.isArray(recentThreadIds)
-    && recentThreadIds.some((candidate) => normalizeDesktopThreadId(candidate) === normalizedThreadId);
+  try {
+    const response = await requestCodexDynamicToolViaCdp(cdp, {
+      sourceThreadId: normalizedThreadId,
+      tool: "read_thread",
+      arguments: {
+        threadId: normalizedThreadId,
+        hostId: "local",
+        turnLimit: 1,
+      },
+    });
+    return response?.thread?.hostId === "local";
+  } catch (error) {
+    if (/No Codex thread found for threadId/i.test(error.message)) return false;
+    throw error;
+  }
 }
 
 async function sendDesktopFollowUp(cdp, threadId, prompt) {
-  await requestCodexHostViaCdp(cdp, undefined, "send-follow-up-message", {
-    hostId: "local",
-    conversationId: threadId,
-    prompt,
+  const response = await requestCodexDynamicToolViaCdp(cdp, {
+    sourceThreadId: threadId,
+    tool: "send_message_to_thread",
+    arguments: { hostId: "local", threadId, prompt },
   });
-  return threadId;
+  return normalizeDesktopThreadId(response?.threadId) ?? threadId;
 }
 
-async function startDesktopConversation(cdp, workspacePath, title, prompt) {
-  const response = await requestCodexHostViaCdp(cdp, undefined, "start-conversation", {
-    hostId: "local",
-    input: [{ type: "text", text: prompt, text_elements: [] }],
-    cwd: workspacePath,
-    workspaceRoots: [workspacePath],
-    collaborationMode: null,
-    useAppServerPermissionDefault: true,
-    threadSource: "user",
-    workspaceKind: "project",
-    initialTitle: title,
-    skipAutoTitleGeneration: true,
+async function resolveDesktopProjectId(cdp, sourceThreadId, workspacePath) {
+  const response = await requestCodexDynamicToolViaCdp(cdp, {
+    sourceThreadId,
+    tool: "list_projects",
+    arguments: {},
   });
-  const threadId = normalizeDesktopThreadId(response?.threadId ?? response);
+  const expectedPath = path.resolve(workspacePath);
+  const project = response?.projects?.find((candidate) => (
+    candidate?.projectKind === "local"
+    && typeof candidate.path === "string"
+    && path.resolve(candidate.path) === expectedPath
+  ));
+  if (!project?.projectId) {
+    throw new Error(`Codex Desktop has no local project for '${workspacePath}'`);
+  }
+  return project.projectId;
+}
+
+async function startDesktopConversation(cdp, sourceThreadId, codexProjectId, title, prompt) {
+  const response = await requestCodexDynamicToolViaCdp(cdp, {
+    sourceThreadId,
+    tool: "create_thread",
+    arguments: {
+      title,
+      prompt,
+      target: {
+        type: "project",
+        projectId: codexProjectId,
+        environment: { type: "local" },
+      },
+    },
+  });
+  const threadId = normalizeDesktopThreadId(response?.threadId);
   if (!threadId) throw new Error("Codex Desktop did not return the new conversation id");
   return threadId;
 }
 
-async function deliverMentionToDesktop(cdp, config, trigger) {
-  const workspacePath = trigger.task?.developmentContext?.type === "worktree"
+async function waitForDesktopThreadCompletion(cdp, threadId) {
+  const sourceThreadId = randomUUID();
+  while (true) {
+    const response = await requestCodexDynamicToolViaCdp(cdp, {
+      sourceThreadId,
+      tool: "wait_threads",
+      arguments: {
+        targets: [{ threadId, hostId: "local" }],
+        timeoutMs: 15_000,
+      },
+    });
+    const error = response?.errors?.find((candidate) => candidate?.threadId === threadId);
+    if (error?.message) throw new Error(error.message);
+    const poll = response?.polls?.find((candidate) => candidate?.thread?.id === threadId);
+    const turn = poll?.latestTurn;
+    if (turn?.status === "completed") return turn;
+    if (turn?.status === "failed" || turn?.status === "interrupted") {
+      throw new Error(turn.error?.message || `Codex Desktop turn ${turn.status}`);
+    }
+    if (!response?.timedOut) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+}
+
+function mentionWorkspacePath(config, trigger) {
+  return trigger.task?.developmentContext?.type === "worktree"
     && trigger.task.developmentContext.path
     ? trigger.task.developmentContext.path
     : config.projectMappings?.[trigger.project?.id];
+}
+
+async function readMentionGitState(workspacePath) {
+  if (!workspacePath) return null;
+  try {
+    const [commitResult, branchResult] = await Promise.all([
+      execFileAsync("git", ["-C", workspacePath, "rev-parse", "HEAD"], {
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+      }),
+      execFileAsync("git", ["-C", workspacePath, "branch", "--show-current"], {
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+      }),
+    ]);
+    return {
+      commit: commitResult.stdout.trim() || null,
+      branch: branchResult.stdout.trim() || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function changedMentionFiles(workspacePath, baseCommit, resultCommit) {
+  if (!workspacePath || !baseCommit || !resultCommit || baseCommit === resultCommit) return [];
+  try {
+    const result = await execFileAsync(
+      "git",
+      ["-C", workspacePath, "diff", "--name-only", `${baseCommit}..${resultCommit}`],
+      { timeout: 10_000, maxBuffer: 1024 * 1024 },
+    );
+    return [...new Set(result.stdout.split("\n").map((value) => value.trim()).filter(Boolean))]
+      .slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+async function readDesktopCompletionSummary(cdp, threadId) {
+  try {
+    const response = await requestCodexDynamicToolViaCdp(cdp, {
+      sourceThreadId: threadId,
+      tool: "read_thread",
+      arguments: {
+        threadId,
+        hostId: "local",
+        turnLimit: 1,
+        includeOutputs: false,
+        maxOutputCharsPerItem: 4_000,
+      },
+    });
+    const items = response?.turns?.[0]?.items;
+    if (!Array.isArray(items)) return "Codex Desktop completed the assigned work.";
+    const finalAnswer = items.findLast((item) => (
+      item?.type === "agentMessage"
+      && item.phase === "final_answer"
+      && typeof item.text === "string"
+      && item.text.trim()
+    ));
+    const latestMessage = finalAnswer ?? items.findLast((item) => (
+      item?.type === "agentMessage" && typeof item.text === "string" && item.text.trim()
+    ));
+    const summary = latestMessage?.text?.trim() || "Codex Desktop completed the assigned work.";
+    return summary.length > 4_000 ? `${summary.slice(0, 3_999)}…` : summary;
+  } catch {
+    return "Codex Desktop completed the assigned work.";
+  }
+}
+
+async function buildDesktopMentionCheckpoint({
+  cdp,
+  threadId,
+  workspacePath,
+  baseGit,
+  status,
+  error,
+}) {
+  const resultGit = await readMentionGitState(workspacePath);
+  const summary = status === "completed"
+    ? await readDesktopCompletionSummary(cdp, threadId)
+    : (error || "Codex Desktop did not complete the assigned work.");
+  return {
+    summary: summary.length > 4_000 ? `${summary.slice(0, 3_999)}…` : summary,
+    changedFiles: await changedMentionFiles(
+      workspacePath,
+      baseGit?.commit,
+      resultGit?.commit,
+    ),
+    baseCommit: baseGit?.commit ?? null,
+    resultCommit: resultGit?.commit ?? null,
+    branch: resultGit?.branch ?? baseGit?.branch ?? null,
+  };
+}
+
+async function deliverMentionToDesktop(cdp, config, trigger) {
+  const workspacePath = mentionWorkspacePath(config, trigger);
   if (!workspacePath) {
     throw new Error(`Project '${trigger.project?.id ?? "unknown"}' is not mapped on this device`);
   }
@@ -1193,14 +1437,20 @@ async function deliverMentionToDesktop(cdp, config, trigger) {
   const instruction = buildMentionAssignmentMessage(trigger);
   const prompt = `[$manage-taskboard](${metadata.manageTaskboardSkillPath}) `
     + `[$i-have-adhd:i-have-adhd](${metadata.iHaveAdhdSkill.path}) ${instruction}`;
-  const acceptedThreadId = threadId
-    ? await sendDesktopFollowUp(cdp, threadId, prompt)
-    : await startDesktopConversation(
+  let acceptedThreadId;
+  if (threadId) {
+    acceptedThreadId = await sendDesktopFollowUp(cdp, threadId, prompt);
+  } else {
+    const sourceThreadId = normalizeDesktopThreadId(trigger.task.threadId) ?? randomUUID();
+    const codexProjectId = await resolveDesktopProjectId(cdp, sourceThreadId, workspacePath);
+    acceptedThreadId = await startDesktopConversation(
       cdp,
-      workspacePath,
+      sourceThreadId,
+      codexProjectId,
       trigger.task.identifier,
       prompt,
     );
+  }
   await writeDesktopMentionThread(config.deviceTarget.id, trigger.task.id, acceptedThreadId);
   return acceptedThreadId;
 }
@@ -1254,14 +1504,35 @@ async function syncRemoteMentionDelivery(cdp) {
       { method: "POST" },
     );
     if (!trigger) return;
+    const workspacePath = mentionWorkspacePath(config, trigger);
+    const baseGit = await readMentionGitState(workspacePath);
+    let threadId = null;
     try {
-      const threadId = await deliverMentionToDesktop(cdp, config, trigger);
-      await finishRemoteMention(trigger, { status: "completed", threadId });
+      threadId = await deliverMentionToDesktop(cdp, config, trigger);
+      await waitForDesktopThreadCompletion(cdp, threadId);
+      const checkpoint = await buildDesktopMentionCheckpoint({
+        cdp,
+        threadId,
+        workspacePath,
+        baseGit,
+        status: "completed",
+      });
+      await finishRemoteMention(trigger, { status: "completed", threadId, checkpoint });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const checkpoint = await buildDesktopMentionCheckpoint({
+        cdp,
+        threadId,
+        workspacePath,
+        baseGit,
+        status: "failed",
+        error: message,
+      });
       await finishRemoteMention(trigger, {
         status: "failed",
+        ...(threadId ? { threadId } : {}),
         error: message.slice(0, 4_000),
+        checkpoint,
       }).catch(() => {});
       throw error;
     }
