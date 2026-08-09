@@ -9,6 +9,7 @@ import {
   type KeyboardEvent,
   type KeyboardEventHandler,
 } from "react";
+import { createPortal } from "react-dom";
 import type { Attachment, CodexTarget, TaskRelationSummary } from "../types";
 import { attachmentContentUrl } from "../api";
 import { resolveAssignmentBackspace } from "../../../shared/assignment-delete-confirmation.mjs";
@@ -227,8 +228,10 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
     armedAssignmentId = null,
     onArmedAssignmentChange,
   }, ref) {
+    const composerElement = useRef<HTMLDivElement>(null);
     const textareas = useRef(new Map<string, HTMLTextAreaElement>());
     const assignmentInputs = useRef(new Map<string, HTMLInputElement>());
+    const mentionMenuElement = useRef<HTMLDivElement>(null);
     const pendingFocus = useRef<{ id: string; offset: number } | null>(null);
     const pendingAssignmentFocus = useRef<string | null>(null);
     const [mentionMenu, setMentionMenu] = useState<{
@@ -238,6 +241,13 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       query: string;
       selectedIndex: number;
     } | null>(null);
+    const [mentionMenuPosition, setMentionMenuPosition] = useState({
+      top: 0,
+      left: 0,
+      width: 0,
+      maxHeight: 0,
+      ready: false,
+    });
 
     useLayoutEffect(() => {
       for (const element of textareas.current.values()) resizeTextarea(element);
@@ -335,6 +345,57 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
             .map((target) => ({ kind: "codex" as const, target })),
         ]
       : [];
+
+    useLayoutEffect(() => {
+      if (!mentionMenu || filteredMentions.length === 0) return;
+      const composer = composerElement.current;
+      const menu = mentionMenuElement.current;
+      if (!composer || !menu) return;
+
+      const updatePosition = () => {
+        const anchor = composer.getBoundingClientRect();
+        const viewportPadding = 8;
+        const gap = 8;
+        const width = Math.max(0, Math.min(
+          anchor.width,
+          window.innerWidth - viewportPadding * 2,
+        ));
+        const left = Math.max(viewportPadding, Math.min(
+          anchor.left,
+          window.innerWidth - width - viewportPadding,
+        ));
+        const availableAbove = Math.max(0, anchor.top - gap - viewportPadding);
+        const availableBelow = Math.max(
+          0,
+          window.innerHeight - anchor.bottom - gap - viewportPadding,
+        );
+        const desiredHeight = Math.min(menu.scrollHeight, 360);
+        const placeBelow = availableBelow >= desiredHeight || availableBelow >= availableAbove;
+        const maxHeight = Math.min(360, placeBelow ? availableBelow : availableAbove);
+        const renderedHeight = Math.min(desiredHeight, maxHeight);
+        const preferredTop = placeBelow
+          ? anchor.bottom + gap
+          : anchor.top - gap - renderedHeight;
+        const top = Math.max(viewportPadding, Math.min(
+          preferredTop,
+          window.innerHeight - renderedHeight - viewportPadding,
+        ));
+
+        setMentionMenuPosition({ top, left, width, maxHeight, ready: true });
+      };
+
+      updatePosition();
+      const observer = new ResizeObserver(updatePosition);
+      observer.observe(composer);
+      observer.observe(menu);
+      window.addEventListener("resize", updatePosition);
+      window.addEventListener("scroll", updatePosition, true);
+      return () => {
+        observer.disconnect();
+        window.removeEventListener("resize", updatePosition);
+        window.removeEventListener("scroll", updatePosition, true);
+      };
+    }, [filteredMentions.length, mentionMenu]);
 
     function chooseMention(option: (typeof filteredMentions)[number]) {
       if (!mentionMenu) return;
@@ -533,11 +594,61 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
       segment.type === "codex-assignment" || segment.type === "issue-mention"
     ));
 
+    const mentionPicker = mentionMenu && filteredMentions.length > 0
+      ? createPortal(
+        <div
+          ref={mentionMenuElement}
+          className="codex-mention-menu"
+          role="listbox"
+          aria-label="选择议题或 Codex 目标"
+          style={{
+            top: mentionMenuPosition.top,
+            left: mentionMenuPosition.left,
+            width: mentionMenuPosition.width,
+            maxHeight: mentionMenuPosition.maxHeight,
+            visibility: mentionMenuPosition.ready ? "visible" : "hidden",
+          }}
+        >
+          <div className="codex-mention-menu-title">提及议题或分配设备任务</div>
+          <div className="codex-mention-menu-options">
+            {filteredMentions.map((option, index) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={index === mentionMenu.selectedIndex}
+                className={index === mentionMenu.selectedIndex ? "is-selected" : ""}
+                key={option.kind === "issue" ? `issue-${option.task.id}` : `codex-${option.target.id}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => chooseMention(option)}
+              >
+                {option.kind === "issue" ? (
+                  <>
+                    <span className="issue-mention-marker">@</span>
+                    <strong>{option.task.identifier}</strong>
+                    <span>{option.task.title}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className={`codex-target-presence ${option.target.online ? "is-online" : ""}`} />
+                    <strong>{option.target.name}</strong>
+                    <span>{option.target.online ? "在线，立即处理" : "离线，上线后处理"}</span>
+                  </>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )
+      : null;
+
     return (
-      <div
-        className={`inline-media-composer${hasInlineObjects ? " has-inline-assignments" : ""} ${className}`.trim()}
-        aria-label={ariaLabel}
-      >
+      <>
+        <div
+          ref={composerElement}
+          className={`inline-media-composer${hasInlineObjects ? " has-inline-assignments" : ""} ${className}`.trim()}
+          aria-label={ariaLabel}
+        >
         {segments.map((segment, index) => (
           segment.type === "text" ? (
             <textarea
@@ -635,37 +746,9 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
             </label>
           )
         ))}
-        {mentionMenu && filteredMentions.length > 0 && (
-          <div className="codex-mention-menu" role="listbox" aria-label="选择议题或 Codex 目标">
-            <div className="codex-mention-menu-title">提及议题或分配设备任务</div>
-            {filteredMentions.map((option, index) => (
-              <button
-                type="button"
-                role="option"
-                aria-selected={index === mentionMenu.selectedIndex}
-                className={index === mentionMenu.selectedIndex ? "is-selected" : ""}
-                key={option.kind === "issue" ? `issue-${option.task.id}` : `codex-${option.target.id}`}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => chooseMention(option)}
-              >
-                {option.kind === "issue" ? (
-                  <>
-                    <span className="issue-mention-marker">@</span>
-                    <strong>{option.task.identifier}</strong>
-                    <span>{option.task.title}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className={`codex-target-presence ${option.target.online ? "is-online" : ""}`} />
-                    <strong>{option.target.name}</strong>
-                    <span>{option.target.online ? "在线，立即处理" : "离线，上线后处理"}</span>
-                  </>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+        </div>
+        {mentionPicker}
+      </>
     );
   },
 );

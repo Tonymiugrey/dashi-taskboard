@@ -3972,17 +3972,24 @@ kbd {
 }
 
 .codex-mention-menu {
-  position: absolute;
-  z-index: 20;
-  right: 12px;
-  bottom: 8px;
-  left: 12px;
+  position: fixed;
+  z-index: 1400;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   padding: 5px;
   border: var(--border-hairline) solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface-raised, var(--surface));
   box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
+}
+
+.codex-mention-menu-options {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+  scrollbar-width: thin;
 }
 
 .codex-mention-menu-title {
