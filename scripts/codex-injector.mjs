@@ -603,6 +603,7 @@ async function requestCodexHostViaCdp(cdp, executionContextId, method, params) {
           responseType: message.responseType,
           status: message.status,
           bodyJsonString: message.bodyJsonString,
+          error: message.error,
         });
       };
       const timeout = window.setTimeout(
@@ -636,7 +637,7 @@ async function requestCodexHostViaCdp(cdp, executionContextId, method, params) {
   const response = evaluation.result.value;
   if (!response?.ok) throw new Error(response?.error || "Codex Desktop request failed");
   if (!Number.isInteger(response.status) || response.status < 200 || response.status >= 300) {
-    throw new Error(`Codex Desktop request returned HTTP ${response.status}`);
+    throw new Error(response.error || `Codex Desktop request returned HTTP ${response.status}`);
   }
   if (typeof response.bodyJsonString !== "string" || response.bodyJsonString.length === 0) {
     return {};
