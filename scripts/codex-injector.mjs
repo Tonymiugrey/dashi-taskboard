@@ -963,24 +963,33 @@ async function syncRemoteAutomationPolicies(cdp) {
       const applied = remoteAutomationVersions.get(automation.projectId);
       if (applied?.targetId === config.deviceTarget.id && applied.version === automation.version) continue;
       const previous = quotaPolicyRecords.get(automation.projectId)?.request;
-      remoteAutomationVersions.set(automation.projectId, {
+      const remoteVersion = {
         targetId: config.deviceTarget.id,
         version: automation.version,
-      });
-      await updateAndApplyQuotaPolicy({
-        taskboardProjectId: automation.projectId,
-        codexProjectId: automation.projectId,
-        projectName: automation.projectName,
-        workspacePath,
-        skillPath: metadata.manageTaskboardSkillPath,
-        adhdSkillPath: metadata.iHaveAdhdSkill.path,
-        ...(previous?.automationId ? { automationId: previous.automationId } : {}),
-        enabledByUser: automation.enabledByUser,
-        quotaAware: automation.quotaAware,
-        intervalMinutes: automation.intervalMinutes,
-        model: automation.model,
-        reasoningEffort: automation.reasoningEffort,
-      }, cdp, (method, body) => requestCodexAutomationViaCdp(cdp, undefined, method, body));
+      };
+      remoteAutomationVersions.set(automation.projectId, remoteVersion);
+      try {
+        const codexProjectId = await resolveDesktopProjectId(cdp, randomUUID(), workspacePath);
+        await updateAndApplyQuotaPolicy({
+          taskboardProjectId: automation.projectId,
+          codexProjectId,
+          projectName: automation.projectName,
+          workspacePath,
+          skillPath: metadata.manageTaskboardSkillPath,
+          adhdSkillPath: metadata.iHaveAdhdSkill.path,
+          ...(previous?.automationId ? { automationId: previous.automationId } : {}),
+          enabledByUser: automation.enabledByUser,
+          quotaAware: automation.quotaAware,
+          intervalMinutes: automation.intervalMinutes,
+          model: automation.model,
+          reasoningEffort: automation.reasoningEffort,
+        }, cdp, (method, body) => requestCodexAutomationViaCdp(cdp, undefined, method, body));
+      } catch (error) {
+        if (remoteAutomationVersions.get(automation.projectId) === remoteVersion) {
+          remoteAutomationVersions.delete(automation.projectId);
+        }
+        throw error;
+      }
     }
   } finally {
     remoteAutomationSyncing = false;
